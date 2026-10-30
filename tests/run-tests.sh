@@ -2297,5 +2297,28 @@ else
 	grep -n 'ttyd0' "$stage/etc.hdd/ttys" 2>/dev/null | sed 's/^/      | /'
 fi
 
+# (C13) the desktop ships every X video and input driver DPorts has and the
+#      GPU userland (x11/xorg alone brings only the xorg-drivers defaults)
+c9bad=''
+for p in x11-drivers/xf86-video-amdgpu x11-drivers/xf86-video-ast \
+	x11-drivers/xf86-video-ati x11-drivers/xf86-video-dummy \
+	x11-drivers/xf86-video-intel x11-drivers/xf86-video-mga \
+	x11-drivers/xf86-video-nv x11-drivers/xf86-video-scfb \
+	x11-drivers/xf86-video-vesa x11-drivers/xf86-input-egalax \
+	x11-drivers/xf86-input-elographics x11-drivers/xf86-input-evdev \
+	x11-drivers/xf86-input-joystick x11-drivers/xf86-input-keyboard \
+	x11-drivers/xf86-input-libinput x11-drivers/xf86-input-mouse \
+	x11-drivers/xf86-input-synaptics x11-drivers/xf86-input-void \
+	x11-drivers/xf86-input-wacom graphics/mesa-dri graphics/mesa-libs \
+	multimedia/libva-intel-driver multimedia/libva-intel-media-driver; do
+	grep -q "^$p\$" "$repo/overlay/profiles/desktop/packages.list" 2>/dev/null ||
+		c9bad="$c9bad $p"
+done
+if [ -z "$c9bad" ]; then
+	ok "(C13) the desktop ships every X driver of DPorts and the GPU userland"
+else
+	no "(C13) the desktop ships every X driver of DPorts and the GPU userland:$c9bad"
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
