@@ -1,0 +1,29 @@
+#!/bin/sh
+#
+# tests/stubs/tar — a stand-in for tar(1) used by the test suite.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# It appends its arguments to $STUB_LOG and creates the archive it was
+# asked to write, so a test can assert that an archive was produced.
+
+set -eu
+
+: "${STUB_LOG:=/dev/null}"
+printf 'CMD tar %s\n' "$*" >> "$STUB_LOG"
+
+out=''
+while [ $# -gt 0 ]; do
+	case $1 in
+	-f)
+		out=${2:-}
+		shift 2 || shift
+		;;
+	*) shift ;;
+	esac
+done
+
+[ -n "$out" ] || exit 0
+: > "$out"
+
+exit 0

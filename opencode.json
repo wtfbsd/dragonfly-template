@@ -1,0 +1,17 @@
+{
+  "instructions": [
+    "AGENTS.md"
+  ],
+  "agent": {
+    "builder": {
+      "description": "Builds the DragonFly distribution template: dry run first, real build only when asked.",
+      "mode": "subagent",
+      "prompt": "Read AGENTS.md and then follow .opencode/agent/builder.md."
+    },
+    "tester": {
+      "description": "Runs the test suite of the DragonFly distribution template and reports red and green.",
+      "mode": "subagent",
+      "prompt": "Read AGENTS.md and then follow .opencode/agent/tester.md."
+    }
+  }
+}

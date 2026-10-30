@@ -1,0 +1,17 @@
+#!/bin/sh
+#
+# @SLUG@-info — print the identity of this installation.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The values below were substituted by build.sh when the overlay was
+# copied over the release root. Nothing is read and nothing is executed:
+# the script only prints what the build wrote into it.
+
+set -eu
+
+printf 'product: %s\n' '@DISTRO_NAME@'
+printf 'slug: %s\n' '@SLUG@'
+printf 'root filesystem of this image: %s\n' 'UFS'
+printf 'native filesystem of DragonFly: %s\n' '@FILESYSTEM_ROOT@'
+printf 'home page: %s\n' '@BRAND_URL@'

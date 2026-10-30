@@ -1,0 +1,331 @@
+#!/bin/sh
+#
+# tests/stubs/make — a stand-in for make(1) used by the test suite.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The suite has to exercise the REAL build path of build.sh, not only the
+# dry run, on a host that has no DragonFly toolchain. This stand-in takes
+# the place of make(1).
+#
+# The options are the ones of make(1) (the man page of the BSD system):
+# -B, -C, -d, -f, -j, -k, -n, -p, -q, -r, -s, -t, -w and -W. An option
+# that is not on that list is an error, so that a build.sh that asks
+# make(1) for something it does not know fails the test.
+#
+# The targets are the ones of the fake Makefiles in tests/fixtures
+# declare: the Makefile of the top level has buildworld and buildkernel,
+# the Makefile of nrelease has the targets of the upstream nrelease
+# directory of DragonFly (check, clean, buildworld1, buildkernel1,
+# buildiso, pkgs, customizeiso, srcs, mkiso, mkimg and release). A
+# target that the Makefile of the directory does not define is an error.
+# "gui" is a modifier of the release, not a target: it is never looked
+# for in the Makefile.
+#
+# The release tooling of DragonFly is mirrored here (upstream
+# nrelease/Makefile):
+#
+#   check          needs the DPorts tree (DPORTS_PATH, /usr/dports)
+#   clean          removes the release root
+#   buildworld1    builds the world
+#   buildkernel1   builds the kernel
+#   buildiso       stages the release root (it cleans it first)
+#   pkgs           installs the packages of the release
+#   customizeiso   snapshots ${ISOROOT}/etc into ${ISOROOT}/etc.hdd,
+#                  copies the rootskels over ${ISOROOT}, creates the
+#                  installer account (uid 0, empty password) and empties
+#                  the password of root
+#   srcs           puts the sources into the release root
+#   mkiso          writes the ISOFILE
+#   mkimg          writes the IMGFILE, copies the release root into
+#                  ${IMGMNT} and creates the sentinel of the first boot
+#                  there (${IMGMNT}/firstboot)
+#
+# The rootskels are resolved with the semantics of the Makefile of the
+# fake nrelease directory: REQ_ROOTSKELS, ROOTSKELS?= and ROOTSKELS+=
+# (the += line under the gui modifier). A ROOTSKELS on the command line
+# REPLACES every one of them, exactly as make(1) does.
+#
+# Every assignment of the command line is written to $STUB_LOG, so that a
+# test can say what the build really asked for. The two media hold the
+# number of the call that wrote them and the loader.conf(5) of the
+# release root at that moment, so that a test can say WHEN a media was
+# built.
+
+set -eu
+
+: "${STUB_LOG:=/dev/null}"
+printf 'CMD make %s\n' "$*" >> "$STUB_LOG"
+
+here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+fixtures="$here/../fixtures"
+
+dir=.
+targets=''
+modifier=''
+rootskels_cmdline=''
+
+while [ $# -gt 0 ]; do
+	case $1 in
+	-B | -d | -k | -n | -p | -q | -r | -s | -t | -w)
+		shift
+		;;
+	-C)
+		dir=${2:-.}
+		shift 2 || shift
+		;;
+	-f | -j | -W)
+		shift 2 || shift
+		;;
+	-*)
+		printf 'make: unknown option: %s\n' "$1" >&2
+		exit 2
+		;;
+	*=*)
+		_name=${1%%=*}
+		_value=${1#*=}
+		printf 'VAR %s=%s\n' "$_name" "$_value" >> "$STUB_LOG"
+		case $_name in
+		ISODIR) ISODIR=$_value ;;
+		ISOROOT) ISOROOT=$_value ;;
+		ROOTSKELS) rootskels_cmdline=$_value ;;
+		ISOFILE) ISOFILE=$_value ;;
+		IMGFILE) IMGFILE=$_value ;;
+		IMGMNT) IMGMNT=$_value ;;
+		DPORTS_PATH) DPORTS_PATH=$_value ;;
+		DPORTS_EXTRA_PACKAGES) DPORTS_EXTRA_PACKAGES=$_value ;;
+		esac
+		shift
+		;;
+	*)
+		if [ "$1" = gui ]; then
+			modifier=gui
+		else
+			targets="$targets $1"
+		fi
+		shift
+		;;
+	esac
+done
+
+[ -n "$targets" ] || {
+	printf 'make: no target\n' >&2
+	exit 2
+}
+[ -f "$dir/Makefile" ] || {
+	printf 'make: no Makefile in %s\n' "$dir" >&2
+	exit 2
+}
+for _t in $targets; do
+	if ! grep -q "^$_t:" "$dir/Makefile"; then
+		printf 'make: no rule to make target %s in %s/Makefile\n' "$_t" "$dir" >&2
+		exit 2
+	fi
+done
+
+: "${ISODIR:=/usr/obj/release/iso}"
+: "${ISOROOT:=$ISODIR/root}"
+: "${ISOFILE:=$ISODIR/dfly.iso}"
+: "${IMGFILE:=$ISODIR/dfly.img}"
+: "${IMGMNT:=$ISODIR/mnt}"
+: "${DPORTS_PATH:=/usr/dports}"
+: "${DPORTS_EXTRA_PACKAGES:=}"
+
+# --------------------------------------------------------------------------
+# the rootskels, with the semantics of the Makefile
+# --------------------------------------------------------------------------
+# REQ_ROOTSKELS is the skeleton of the release root, ROOTSKELS?= is the
+# default and ROOTSKELS+= adds the skeleton of the GUI under the gui
+# modifier. A ROOTSKELS on the command line replaces all of them.
+make_rootskels() { # make_rootskels <dir> <gui?>
+	_mk_req=$(sed -n 's/^REQ_ROOTSKELS=[[:space:]]*//p' "$dir/Makefile" | head -1)
+	_mk_def=$(sed -n 's/^ROOTSKELS?=[[:space:]]*//p' "$dir/Makefile" | head -1)
+	_mk_gui=$(awk '
+		/^[.]if[[:space:]]+make\(gui\)/ { ingui = 1; next }
+		/^[.]endif/ { ingui = 0; next }
+		ingui && /^ROOTSKELS[+]=/ {
+			sub(/^ROOTSKELS[+]=[[:space:]]*/, "")
+			print
+			exit
+		}' "$dir/Makefile")
+	_mk_out=''
+	# the default: the value of the ?= line, with ${REQ_ROOTSKELS} and
+	# ${.CURDIR} expanded
+	if [ -n "$_mk_def" ]; then
+		_mk_val=$_mk_def
+		_mk_reqval=$(printf '%s' "$_mk_req" | sed -e "s|\${.CURDIR}|$dir|g")
+		_mk_val=$(printf '%s' "$_mk_val" |
+			sed -e "s|\${REQ_ROOTSKELS}|$_mk_reqval|g" -e "s|\${.CURDIR}|$dir|g")
+		_mk_out=$_mk_val
+	fi
+	# the += line, under the gui modifier
+	if [ -n "$_mk_gui" ] && [ "${2:-}" = gui ]; then
+		_mk_gui=$(printf '%s' "$_mk_gui" | sed -e "s|\${.CURDIR}|$dir|g")
+		_mk_out="$_mk_out $_mk_gui"
+	fi
+	printf '%s\n' "$_mk_out"
+}
+
+if [ -n "$rootskels_cmdline" ]; then
+	ROOTSKELS=$rootskels_cmdline
+else
+	ROOTSKELS=$(make_rootskels "$dir" "$modifier")
+fi
+
+# --------------------------------------------------------------------------
+# the targets of the release tooling
+# --------------------------------------------------------------------------
+
+# check: the DPorts tree has to be there, the packages are built from it
+target_check() {
+	if [ ! -d "$DPORTS_PATH" ]; then
+		printf '%s does not exist.\n' "$DPORTS_PATH" >&2
+		printf 'Please set DPORTS_PATH to the dports tree that shall be used for\n' >&2
+		printf 'package building. The default is /usr/dports.\n' >&2
+		exit 1
+	fi
+	printf 'Using %s as the dports tree.\n' "$DPORTS_PATH" >> "$STUB_LOG"
+}
+
+# clean: the release root is removed
+target_clean() {
+	rm -rf -- "$ISOROOT"
+}
+
+# buildiso: the base system is staged in the release root
+target_buildiso() {
+	mkdir -p "$ISOROOT"
+	cp -R "$fixtures/release-root/." "$ISOROOT/"
+	cp "$fixtures/master.passwd" "$ISOROOT/etc/master.passwd"
+}
+
+# pkgs: the packages of the release are installed in the release root
+target_pkgs() {
+	if [ -n "$DPORTS_EXTRA_PACKAGES" ]; then
+		mkdir -p "$ISOROOT"
+		printf '%s\n' "$DPORTS_EXTRA_PACKAGES" > "$ISOROOT/.dp-extra-packages"
+	fi
+}
+
+# customizeiso: the snapshot of /etc, the rootskels, the installer account
+# and the empty password of root (the order of the upstream target)
+target_customizeiso() {
+	mkdir -p "$ISOROOT/etc"
+	STUB_LOG=/dev/null pwd_mkdb -p -d "$ISOROOT/etc" "$ISOROOT/etc/master.passwd"
+	# the snapshot of /etc, BEFORE the rootskels are applied: the
+	# installer copies <dir>.hdd in place of <dir>
+	mkdir -p "$ISOROOT/etc.hdd"
+	cp -R "$ISOROOT/etc/." "$ISOROOT/etc.hdd/"
+	# the rootskels: the contents of every directory are copied over the
+	# release root, in the order of ROOTSKELS, and each one overwrites
+	# the last
+	for _sk in $ROOTSKELS; do
+		[ -d "$_sk" ] || continue
+		cp -R "$_sk/." "$ISOROOT/"
+	done
+	# the installer account: uid 0 and an empty password
+	if [ -f "$ISOROOT/etc/master.passwd" ]; then
+		grep -q '^installer:' "$ISOROOT/etc/master.passwd" ||
+			printf 'installer::0:0::0:0:DragonFly Installer:/root:/usr/sbin/installer\n' \
+				>> "$ISOROOT/etc/master.passwd"
+		awk -F: 'BEGIN { OFS = ":" } $1 == "root" || $1 == "installer" { $2 = "" } { print }' \
+			"$ISOROOT/etc/master.passwd" > "$ISOROOT/etc/master.passwd.new"
+		mv "$ISOROOT/etc/master.passwd.new" "$ISOROOT/etc/master.passwd"
+	fi
+	if [ -f "$ISOROOT/etc/passwd" ]; then
+		grep -q '^installer:' "$ISOROOT/etc/passwd" ||
+			printf 'installer:x:0:0::0:0:DragonFly Installer:/root:/usr/sbin/installer\n' \
+				>> "$ISOROOT/etc/passwd"
+	fi
+}
+
+# srcs: the sources of the release
+target_srcs() {
+	mkdir -p "$ISOROOT/usr"
+	: > "$ISOROOT/usr/src-sys.tar.bz2"
+}
+
+# the media: every call writes its own number and the loader.conf(5) of
+# the release root at that moment, so that a test can say WHEN a media
+# was built
+media_content() { # media_content <file>
+	_mc_n=0
+	if [ -f "$1" ]; then
+		_mc_n=$(grep -c '^media call ' "$1" 2> /dev/null || true)
+		case $_mc_n in
+		'' | *[!0-9]*) _mc_n=0 ;;
+		esac
+	fi
+	_mc_n=$((_mc_n + 1))
+	{
+		printf 'media call %s\n' "$_mc_n"
+		if [ -f "$ISOROOT/boot/loader.conf" ]; then
+			sed 's/^/loader.conf: /' "$ISOROOT/boot/loader.conf"
+		fi
+	} > "$1"
+}
+
+target_mkiso() {
+	mkdir -p "$(dirname -- "$ISOFILE")"
+	media_content "$ISOFILE"
+}
+
+target_mkimg() {
+	mkdir -p "$(dirname -- "$IMGFILE")"
+	# the release root is copied into the mount point of the image
+	mkdir -p "$IMGMNT"
+	cp -R "$ISOROOT/." "$IMGMNT/"
+	# only mkimg creates the sentinel of the first boot
+	: > "$IMGMNT/firstboot"
+	media_content "$IMGFILE"
+}
+
+for _t in $targets; do
+	printf 'TARGET %s\n' "$_t" >> "$STUB_LOG"
+	[ -z "$modifier" ] || printf 'MODIFIER %s\n' "$modifier" >> "$STUB_LOG"
+	case $_t in
+	check)
+		target_check
+		;;
+	clean)
+		target_clean
+		;;
+	buildworld1 | buildkernel1)
+		: > "$dir/.stub-$_t"
+		;;
+	buildiso)
+		target_clean
+		target_buildiso
+		;;
+	pkgs)
+		target_pkgs
+		;;
+	customizeiso)
+		target_customizeiso
+		;;
+	srcs)
+		target_srcs
+		;;
+	mkiso)
+		target_mkiso
+		;;
+	mkimg)
+		target_mkimg
+		;;
+	release)
+		# the release target builds the world and the kernel itself
+		: > "$dir/.stub-buildworld1"
+		: > "$dir/.stub-buildkernel1"
+		target_customizeiso
+		target_srcs
+		target_mkiso
+		target_mkimg
+		;;
+	*)
+		printf 'make: the stub has no rule for the target %s\n' "$_t" >&2
+		exit 2
+		;;
+	esac
+done
+
+exit 0

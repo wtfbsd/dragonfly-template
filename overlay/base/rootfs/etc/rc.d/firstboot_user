@@ -1,0 +1,248 @@
+#!/bin/sh
+#
+# firstboot_user — provision the operator user and the SSH keys on the
+# first boot.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# build.sh locks root in the image (the stock release leaves it with an
+# EMPTY password), so the login happens through an account that is
+# provisioned on the first boot. This script reads the first-boot
+# configuration, parses it line by line (it is NEVER sourced: it is
+# operator data and may hold a crypt(3) password hash), creates the
+# account, installs the keys and moves the configuration out of the way.
+#
+# The configuration lives in /boot/firstboot-user.conf; the path is the
+# rc variable firstboot_user_conf.
+#
+#   USERNAME=alice        ^[a-z_][a-z0-9_-]{0,31}$            (required)
+#   FULLNAME=Alice        no ':' and no control characters    (optional)
+#   SSH_KEY=ssh-...       one authorized_keys line, repeatable
+#   PASSWORD_HASH=$6$...  crypt(3) starting with $6$, $5$ or $2b$ (optional)
+#   WHEEL=yes|no          default yes
+#
+# The script guards itself: while the configuration file is absent it
+# does nothing at all, so it can run at every boot. Its rc.d keyword is
+# NOT the firstboot keyword: the installer of DragonFly copies only the
+# paths of share/installer/sources.conf, and /firstboot is not among
+# them, so a script that is guarded by that keyword never runs on an
+# installed system. The configuration file is the guard this script
+# relies upon; the sentinel is removed once the provisioning is done.
+#
+# The live media (the ISO) has a read-only home directory: the script
+# says so and creates nothing there. The account is provisioned on the
+# installed system, whose home directory is writable.
+#
+# With a PASSWORD_HASH the hash is fed to pw(8) over stdin; without one
+# the password stays '*' (the pw useradd default) so that key login
+# works. pw lock is WRONG here: a locked account cannot ssh at all.
+#
+# doas: WHEEL=yes puts the user in wheel; the overlay ships
+# /usr/local/etc/doas.conf with "permit persist :wheel".
+
+# PROVIDE: firstboot_user
+# REQUIRE: FILESYSTEMS NETWORKING
+# BEFORE: LOGIN
+# KEYWORD: nojail
+
+. /etc/rc.subr
+
+name=firstboot_user
+rcvar=firstboot_user_enable
+
+: ${firstboot_user_enable:="YES"}
+: ${firstboot_user_conf:="/boot/firstboot-user.conf"}
+load_rc_config "$name"
+
+note() { # note <msg> — to the console and to syslog
+	echo "firstboot_user: $*"
+	logger -t firstboot_user "$*"
+}
+
+firstboot_user_start() {
+	local _conf=$firstboot_user_conf
+	local _k _l _v _user _full _keys _nkeys _hash _wheel _home _homebase _n
+
+	# the guard: no configuration, nothing to do
+	if [ ! -f "$_conf" ]; then
+		return 0
+	fi
+
+	# pass 1: parse and validate EVERYTHING before touching the system
+	_user=''
+	_full=''
+	_keys=''
+	_nkeys=0
+	_hash=''
+	_wheel='yes'
+	# the certificate key types of OpenSSH carry the name of the project
+	# as their domain; the domain is kept in a variable, so that the
+	# name of the type does not look like an email address
+	_oss='@openssh.com'
+	while IFS= read -r _l || [ -n "$_l" ]; do
+		case $_l in
+		'' | '#'*) continue ;;
+		[A-Z_]*=*) ;;
+		*)
+			note "not a KEY=value line: $_l"
+			return 1
+			;;
+		esac
+		_k=${_l%%=*}
+		_v=${_l#*=}
+		case $_k in
+		USERNAME)
+			if ! printf '%s\n' "$_v" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$'; then
+				note 'USERNAME must match ^[a-z_][a-z0-9_-]{0,31}$'
+				return 1
+			fi
+			_user=$_v
+			;;
+		FULLNAME)
+			case $_v in
+			*:*)
+				note 'FULLNAME may not contain ":"'
+				return 1
+				;;
+			esac
+			if [ -n "$(printf '%s\n' "$_v" | grep -E '[[:cntrl:]]')" ]; then
+				note 'FULLNAME may not contain control characters'
+				return 1
+			fi
+			_full=$_v
+			;;
+		SSH_KEY)
+			case $_v in
+			ssh-ed25519* | ssh-rsa* | ecdsa-sha2-nistp256* | ecdsa-sha2-nistp384* | ecdsa-sha2-nistp521* | sk-ssh-ed25519"$_oss"* | sk-ecdsa-sha2-nistp256"$_oss"*) ;;
+			*)
+				note 'SSH_KEY must be one authorized_keys line of a known key type'
+				return 1
+				;;
+			esac
+			_keys="$_keys
+$_v"
+			_nkeys=$((_nkeys + 1))
+			;;
+		PASSWORD_HASH)
+			case $_v in
+			'$6$'* | '$5$'* | '$2b$'* | '$2y$'*) ;;
+			*)
+				note 'PASSWORD_HASH must be a crypt(3) string starting with $6$, $5$ or $2b$'
+				return 1
+				;;
+			esac
+			_hash=$_v
+			;;
+		WHEEL)
+			case $_v in
+			yes | no) ;;
+			*)
+				note "WHEEL must be yes or no (got: $_v)"
+				return 1
+				;;
+			esac
+			_wheel=$_v
+			;;
+		*)
+			note "unknown key in $_conf: $_k"
+			return 1
+			;;
+		esac
+	done < "$_conf"
+
+	if [ -z "$_user" ]; then
+		note 'USERNAME is missing'
+		return 1
+	fi
+	if [ "$_nkeys" -lt 1 ] && [ -z "$_hash" ]; then
+		note 'at least one SSH_KEY line or a PASSWORD_HASH is required'
+		return 1
+	fi
+
+	# pass 2: apply
+	#
+	# The live media has a read-only home directory (the ISO is a
+	# cd9660 file system): the account is provisioned on the INSTALLED
+	# system, where the home directory is writable. The script says so
+	# and does nothing else.
+	_homebase=/home
+	if ! ( : > "$_homebase/.firstboot-write-test" ) 2> /dev/null; then
+		note "the home directory $_homebase is not writable: the account is not created here (the installed system creates it)"
+		return 0
+	fi
+	rm -f "$_homebase/.firstboot-write-test"
+
+	if ! pw usershow -n "$_user" > /dev/null 2>&1; then
+		set -- -n "$_user" -c "${_full:-$_user}" -s /bin/sh -m
+		if [ "$_wheel" = yes ]; then
+			set -- "$@" -G wheel
+		fi
+		if ! pw useradd "$@"; then
+			note "pw useradd $_user failed"
+			return 1
+		fi
+		note "created user $_user (shell /bin/sh, wheel=$_wheel)"
+	fi
+
+	if [ -n "$_hash" ]; then
+		# pw(8) -H 0: the encrypted password is read from stdin, so the
+		# hash never appears in the command line
+		if printf '%s\n' "$_hash" | pw usermod -n "$_user" -H 0; then
+			note "password hash applied to $_user"
+		else
+			note "pw usermod -H 0 failed for $_user"
+			return 1
+		fi
+	else
+		# no hash: the password stays '*' — key login works, and the
+		# account is deliberately NOT pw-locked: a locked account
+		# cannot ssh at all.
+		note "no PASSWORD_HASH: the password of $_user stays '*' (key-only login)"
+	fi
+
+	# /etc/passwd has 7 fields: the home directory is field 6 (the
+	# FULLNAME value never contains ':', so -F: is safe)
+	_home=$(awk -F: -v u="$_user" '$1 == u { print $6 }' /etc/passwd)
+	case $_home in
+	/*) ;;
+	*) _home="$_homebase/$_user" ;;
+	esac
+	if ! mkdir -p "$_home/.ssh"; then
+		note "cannot create $_home/.ssh"
+		return 1
+	fi
+	if chmod 700 "$_home/.ssh" \
+		&& printf '%s\n' "${_keys#?}" > "$_home/.ssh/authorized_keys" \
+		&& chmod 600 "$_home/.ssh/authorized_keys" \
+		&& chown "$_user" "$_home/.ssh" "$_home/.ssh/authorized_keys"; then
+		note "installed $_nkeys SSH key(s) for $_user at $_home/.ssh/authorized_keys"
+	else
+		note "failed to write $_home/.ssh/authorized_keys"
+		return 1
+	fi
+
+	# a key-only wheel user (no password to type): let doas accept the
+	# SSH-authenticated session, otherwise the account could never get
+	# root
+	if [ "$_wheel" = yes ] && [ -z "$_hash" ] && [ -f /usr/local/etc/doas.conf ]; then
+		printf 'permit nopass %s\n' "$_user" >> /usr/local/etc/doas.conf
+		note "doas: the key-only wheel user $_user may run commands as root without a password"
+	fi
+
+	if mv "$_conf" "$_conf.done" && chmod 600 "$_conf.done"; then
+		note "first-boot provisioning complete (the configuration moved to $_conf.done)"
+	else
+		note "could not move $_conf out of the way (the user $_user is set up)"
+		return 1
+	fi
+
+	# the sentinel of the first boot is not needed any more
+	if [ -f /firstboot ]; then
+		rm -f /firstboot
+	fi
+	return 0
+}
+
+start_cmd=firstboot_user_start
+
+run_rc_command "$1"

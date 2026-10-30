@@ -1,0 +1,15 @@
+# overlay/profiles/desktop/rc.conf.d/sshd — the sshd of the desktop.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# One rc.conf(5) variable per file. DragonFly's rc.conf(5) is a single
+# file like FreeBSD's, so build.sh merges these fragments into the staged
+# /etc/rc.conf.
+#
+# The desktop has no sshd: the operator sits at the console of the
+# machine, and the account of the first boot needs a password, because a
+# key is of no use without sshd. The skeleton of the GUI of the release
+# tooling enables sshd; the overlay owns the variable, so the desktop of
+# the product has none.
+#
+sshd_enable="NO"

@@ -1,0 +1,28 @@
+# overlay/base/packages.list — the DPorts packages every profile gets.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# One DPorts ORIGIN per line (category/port); blank lines and
+# #-comments are ignored. The build hands the packages to the release
+# tooling of DragonFly, which puts them into the release root:
+#
+#   DPORTS_EXTRA_PACKAGES="<the packages of the base list and of the
+#                            profile list>"
+#
+# The names are DPorts origins and not bare package names: dsynth takes
+# origins only (category/port), and a bare name is only understood under
+# the binpkgs modifier of the release tooling, which this template does
+# not use. The release tooling builds them from the DPorts tree, whose
+# path is DPORTS_PATH (/usr/dports by default).
+#
+# They are plain data, so a site can correct them in this file without
+# touching the build. The names are not verified by this template (see
+# the round report).
+#
+# security/ca_root_nss: the name service switch of the base system, so
+# that the accounts of the first boot are found.
+# security/doas: the privilege escalation of the product; the overlay
+# ships /usr/local/etc/doas.conf with "permit persist :wheel".
+#
+security/ca_root_nss
+security/doas

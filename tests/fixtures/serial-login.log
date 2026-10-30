@@ -1,0 +1,59 @@
+Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+
+The boot transcript below is a DragonFly amd64 serial console transcript,
+hand-written for this fixture in the shape the boot test looks at: it
+starts at the kernel banner and ends at the login prompt. It is used by
+tests/fixtures/fake-provider.sh as the canned serial log of the fake VM,
+and the "no login prompt" case is derived from it by cutting the
+transcript before the prompt.
+
+>> DragonFly v6.4-RELEASE (GENERIC) #0: Thu Jan  1 00:00:00 UTC 2024
+
+Copyright (c) 1995-2024 The DragonFly Project.
+All rights reserved.
+
+This product includes software developed by The DragonFly Project.
+http://www.dragonflybsd.org/
+
+The current boot is from the DragonFly build tree at
+  /usr/src/obj.amd64/DragonFly-amd64/...
+built with  ``make buildworld buildkernel'' and ``make -C /usr/src/nrelease release''
+
+Kernel configuration ``GENERIC''
+root on hammer0:
+rootfs type hammer2
+...
+DragonFly v6.4-RELEASE (GENERIC) #0: Thu Jan  1 00:00:00 UTC 2024
+...
+bootmem = 2097152 KB
+Copyright (c) 1995-2024 The DragonFly Project.  All rights reserved.
+
+[  0.000000] cpu0 at mainbus0: apid 0 (boot processor)
+[  0.000000] cpu0: x86-64 family 0x15 model 0x1 stepping 0x5
+[  0.100000] mainbus0 at bios0
+[  0.100000] mainbus0: apid 0 (boot processor)
+[  1.200000] ahc0 at pci0 dev 1 function 0: "Advanced Host Controller"
+[  1.300000] da0 at ahc0 channel 0
+[  1.400000] uvm0 at 0xffffffffffffffff
+[  1.600000] pms0 at 0xffffffffffffffff
+[  2.100000] isa0 at mainbus0
+[  2.200000] pnp0 at isa0
+[  2.300000] com0 at pnp0
+[  2.400000] pnp1 at isa0
+[  2.500000] wsdisplay0 at pnp1
+[  3.100000] fdc0 at isa0
+[  4.200000] uart0 at isa0
+[  5.100000] sd0 at uart0
+[  6.100000] root-on-disk
+[  6.200000] boot device: da0
+
+root-on-disk
+[  7.100000] init: opening `/etc/rc.conf'
+[  7.200000] init: running /etc/rc.d/rc
+[  7.300000] init: running /etc/rc.d/syslogd
+[  7.400000] init: running /etc/rc.d/sshd
+[  7.500000] init: running /etc/rc.d/ntpd
+[  8.100000] init: running /etc/rc.d/cron
+[  8.200000] init: running /etc/rc.d/sendmail
+[  9.100000] start dragonfly, banner: DragonFly 6.4
+[  9.200000] login:

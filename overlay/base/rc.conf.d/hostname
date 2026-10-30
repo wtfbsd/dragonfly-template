@@ -1,0 +1,13 @@
+# overlay/base/rc.conf.d/hostname — the hostname of the product.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# One rc.conf(5) variable per file. DragonFly's rc.conf(5) is a single
+# file like FreeBSD's, so build.sh merges these fragments into the staged
+# /etc/rc.conf.
+#
+# The hostname of the product is its slug: the placeholder is substituted
+# in the staged copy of this fragment, the overlay itself is never
+# edited.
+#
+hostname="@SLUG@"

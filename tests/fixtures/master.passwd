@@ -1,0 +1,9 @@
+root::0:0::0:0:Charlie Root:/root:/bin/sh
+toor::0:0::0:0:Alternate Root:/root:/bin/sh
+operator::0:0::0:0:Operator:/root:/bin/sh
+installer::0:0::0:0:Installer:/root:/bin/sh
+bin:*:1:1::0:0:binaries:/nonexistent:/usr/sbin/nologin
+games:*:2:2::0:0:games:/nonexistent:/usr/sbin/nologin
+man:*:3:3::0:0:man pages:/nonexistent:/usr/sbin/nologin
+sshd:*:22:22::0:0:ssh daemon:/nonexistent:/usr/sbin/nologin
+nobody:*:65534:65534::0:0:Unprivileged user:/nonexistent:/usr/sbin/nologin

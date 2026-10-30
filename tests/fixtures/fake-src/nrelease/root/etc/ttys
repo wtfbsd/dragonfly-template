@@ -1,0 +1,23 @@
+# ttys of the skeleton of the release root.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# This fixture models nrelease/root/etc/ttys of the upstream nrelease
+# of DragonFly. The line of the serial console keeps the shape of the
+# upstream file: name, getty, terminal type, status and the flags.
+#
+# name	getty				type	status		comments
+#
+console	none				unknown	off secure
+#
+ttyv0	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+ttyv2	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+ttyv3	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+ttyv4	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+ttyv5	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+ttyv6	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+ttyv7	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+# Serial terminals - keep it simple
+#
+ttyd0	"/usr/libexec/getty std.9600"	dialup	on secure
+ttyd1	"/usr/libexec/getty std.9600"	dialup	on secure
