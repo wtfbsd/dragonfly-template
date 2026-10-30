@@ -1,0 +1,18 @@
+# fstab of the skeleton of the release root.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# This fixture models nrelease/root/etc/fstab of the upstream nrelease
+# of DragonFly: the live media mounts /etc, /var, /tmp and /root on a
+# tmpfs. This file belongs to the LIVE media and may never reach the
+# installed system.
+#
+# fstab for ISO/IMG boot
+#
+Device		Mountpoint	FStype	Options		Dump	Pass#
+dummy			/root		tmpfs	rw,-C		0	0
+dummy			/var		tmpfs	rw,-C		0	0
+dummy			/tmp		tmpfs	rw		0	0
+dummy			/etc		tmpfs	rw,-C		0	0
+dummy			/usr/obj	tmpfs	rw		0	0
+proc			/proc		procfs	rw		0	0

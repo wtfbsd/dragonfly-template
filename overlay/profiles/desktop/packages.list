@@ -1,0 +1,42 @@
+# overlay/profiles/desktop/packages.list — the DPorts packages of the
+# desktop profile.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# One DPorts ORIGIN per line (category/port); blank lines and
+# #-comments are ignored. The build hands the packages to the release
+# tooling of DragonFly, which puts them into the release root:
+#
+#   DPORTS_EXTRA_PACKAGES="<the packages of the base list and of the
+#                            profile list>"
+#
+# The names are DPorts origins and not bare package names: dsynth takes
+# origins only (category/port), and a bare name is only understood under
+# the binpkgs modifier of the release tooling, which this template does
+# not use. The release tooling builds them from the DPorts tree, whose
+# path is DPORTS_PATH (/usr/dports by default).
+#
+# The desktop is X11 with Xfce and the LightDM greeter; there is no
+# Wayland anywhere in this distribution.
+#
+# The origins below were checked against the DPorts tree of DragonFly
+# (the directory of every one of them exists):
+#
+# x11/xorg: the X11 server of DragonFly.
+# x11/lightdm: the display manager.
+# x11/lightdm-gtk-greeter: the greeter of LightDM (there is no
+# x11/lightdm-gtk2-greeter in DPorts).
+# x11-wm/xfce4: the metaport of the Xfce desktop: it brings the window
+# manager, the session, the panel and the terminal.
+# x11-fm/thunar: the file manager of the desktop.
+#
+# The modifier "gui" of the release tooling of DragonFly (make gui
+# release) installs a set of its own; the names below are the ones of
+# this overlay, so that the desktop does not depend on what that
+# modifier happens to bring.
+#
+x11/xorg
+x11/lightdm
+x11/lightdm-gtk-greeter
+x11-wm/xfce4
+x11-fm/thunar

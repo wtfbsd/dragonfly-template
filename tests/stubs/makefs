@@ -1,0 +1,23 @@
+#!/bin/sh
+#
+# tests/stubs/makefs — a stand-in for makefs(8) used by the test suite.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# It appends its arguments to $STUB_LOG and creates the image file it was
+# asked to build (the last argument).
+
+set -eu
+
+: "${STUB_LOG:=/dev/null}"
+printf 'CMD makefs %s\n' "$*" >> "$STUB_LOG"
+
+img=''
+for a in "$@"; do
+	img=$a
+done
+
+[ -n "$img" ] || exit 0
+: > "$img"
+
+exit 0

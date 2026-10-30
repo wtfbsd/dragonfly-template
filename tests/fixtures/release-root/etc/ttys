@@ -1,0 +1,24 @@
+# ttys of a stock DragonFly release.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# This fixture models the /etc/ttys of the base system that installworld
+# puts into the release root. The skeleton of the release tooling
+# (nrelease/root/etc/ttys) overwrites it in the live media, and the
+# tree of the installer keeps this one.
+#
+# name	getty				type	status		comments
+#
+console	none				unknown	off secure
+#
+ttyv0	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+ttyv2	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+ttyv3	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+ttyv4	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+ttyv5	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+ttyv6	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+ttyv7	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+# Serial terminals - keep it simple
+#
+ttyd0	"/usr/libexec/getty std.9600"	dialup	on secure
+ttyd1	"/usr/libexec/getty std.9600"	dialup	on secure

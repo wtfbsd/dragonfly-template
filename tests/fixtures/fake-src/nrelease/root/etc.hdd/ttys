@@ -1,0 +1,27 @@
+# ttys of the tree of the installer (the etc.hdd tree of the release root).
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# This fixture models nrelease/root/etc.hdd/ttys of the upstream nrelease
+# of DragonFly: the installer copies etc.hdd in place of etc, so this file
+# is the ttys of the INSTALLED system. The live media gets the serial
+# console of the skeleton of the release tooling, in which the serial
+# line is on; the tree of the installer keeps the stock file, in which
+# the serial line is off, so that the post-customize step has to switch
+# it on there as well.
+#
+# name	getty				type	status		comments
+#
+console	none				unknown	off secure
+#
+ttyv0	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+ttyv2	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+ttyv3	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+ttyv4	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+ttyv5	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+ttyv6	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+ttyv7	"/usr/libexec/getty Pc"		cons25	on  secure ifexists
+# Serial terminals - keep it simple
+#
+ttyd0	"/usr/libexec/getty std.9600"	dialup	off secure
+ttyd1	"/usr/libexec/getty std.9600"	dialup	off secure

@@ -1,0 +1,52 @@
+#!/bin/sh
+#
+# tests/stubs/pkg — a stand-in for pkg(8) used by the test suite.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The options are the ones of pkg(8) (the man page of the BSD system):
+# -a, -c, -d, -f, -g, -h, -i, -j, -k, -l, -n, -o, -q, -r, -s, -v, -x and
+# -I. An option that is not on that list is an error, so that a build.sh
+# that asks pkg(8) for something it does not know fails the test.
+#
+# The build of this template hands the packages of the overlay to the
+# release tooling (DPORTS_EXTRA_PACKAGES), so the build itself does not
+# call pkg(8); the stand-in is here for the sites that stage a package
+# into a release root by hand, and it records the packages it was asked
+# to install in the release root it was given (-r).
+
+set -eu
+
+: "${STUB_LOG:=/dev/null}"
+printf 'CMD pkg %s\n' "$*" >> "$STUB_LOG"
+
+root=''
+args=''
+while [ $# -gt 0 ]; do
+	case $1 in
+	-a | -c | -d | -f | -g | -h | -i | -j | -k | -l | -n | -o | -q | -s | -v | -x | -y)
+		args="$args $1"
+		;;
+	-I)
+		args="$args $1 ${2:-}"
+		shift
+		;;
+	-r)
+		root=${2:-}
+		args="$args $1 $root"
+		shift
+		;;
+	*)
+		printf 'pkg: unknown option: %s\n' "$1" >&2
+		exit 2
+		;;
+	esac
+	shift
+done
+
+if [ -n "$root" ]; then
+	# shellcheck disable=SC2086
+	printf 'pkg %s\n' $args >> "$root/.pkg-installed"
+fi
+
+exit 0

@@ -1,0 +1,48 @@
+#!/bin/sh
+#
+# tests/stubs/pwd_mkdb — a stand-in for pwd_mkdb(8) used by the test suite.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The options are the ones of pwd_mkdb(8) (the man page of the BSD
+# system): -p (print the database), -d dir (the directory of the
+# database), -C (check the file), -u (update the user accounts) and -v
+# (verbose). An option that is not on that list is an error, so that a
+# build.sh that asks pwd_mkdb(8) for something it does not know fails
+# the test.
+#
+# It records the call in $STUB_LOG and creates the database files that
+# the real pwd_mkdb(8) writes in the directory of the password file:
+# pwd.db holds the hashed passwords and spwd.db the plain ones.
+
+set -eu
+
+: "${STUB_LOG:=/dev/null}"
+printf 'CMD pwd_mkdb %s\n' "$*" >> "$STUB_LOG"
+
+dir=''
+file=''
+while [ $# -gt 0 ]; do
+	case $1 in
+	-p | -C | -u | -v) ;;
+	-d)
+		dir=${2:-}
+		shift
+		;;
+	-*)
+		printf 'pwd_mkdb: unknown option: %s\n' "$1" >&2
+		exit 2
+		;;
+	*)
+		file=$1
+		;;
+	esac
+	shift
+done
+
+if [ -n "$dir" ] && [ -n "$file" ]; then
+	: > "$dir/pwd.db"
+	: > "$dir/spwd.db"
+fi
+
+exit 0

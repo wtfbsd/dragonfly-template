@@ -1,0 +1,15 @@
+# overlay/profiles/appliance/packages.list — the DPorts packages of the
+# headless profile.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# One DPorts package name per line; blank lines and #-comments are
+# ignored.
+#
+# The appliance needs no package beyond the base list: sshd is part of
+# the DragonFly base system, so the build enables it through rc.conf(5)
+# (sshd_enable). There is no sudo anywhere in this template: the
+# privilege escalation is doas(1), which the base list brings.
+#
+# The names are not verified by this template (see the round report).
+#

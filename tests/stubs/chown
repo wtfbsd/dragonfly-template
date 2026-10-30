@@ -1,0 +1,53 @@
+#!/bin/sh
+#
+# tests/stubs/chown — a stand-in for chown(8) used by the test suite.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The options are the ones of chown(1) (the man page of the BSD system):
+# -f, -h, -R, -H, -L, -P, -v and -x. An option that is not on that list
+# is an error, so that a build.sh that asks chown(1) for something it
+# does not know fails the test. The options of other systems (-c of GNU
+# coreutils, the long options of GNU) are NOT on that list: the build
+# runs on a BSD system.
+#
+# The suite runs without root, so it cannot give a file to another owner.
+# The stand-in records the call in $STUB_LOG and does nothing else: the
+# test asserts that the build changed the owner of every file of the
+# overlay, and the real build (which runs as root) does the work.
+
+set -eu
+
+: "${STUB_LOG:=/dev/null}"
+printf 'CMD chown %s\n' "$*" >> "$STUB_LOG"
+
+owner=''
+files=''
+while [ $# -gt 0 ]; do
+	case $1 in
+	-R | -H | -L | -P | -f | -h | -v | -x) ;;
+	--)
+		files="$files $*"
+		break
+		;;
+	-*)
+		printf 'chown: unknown option: %s\n' "$1" >&2
+		exit 2
+		;;
+	*)
+		if [ -z "$owner" ]; then
+			owner=$1
+		else
+			files="$files $1"
+		fi
+		;;
+	esac
+	shift
+done
+
+[ -n "$owner" ] || {
+	printf 'chown: no owner and no file\n' >&2
+	exit 2
+}
+
+exit 0

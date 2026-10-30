@@ -1,0 +1,13 @@
+Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+
+@DISTRO_NAME@ (@SLUG@)
+@MOTD@
+
+This system is an overlay on unmodified DragonFly. The root filesystem of
+this release image is UFS: the release tooling of DragonFly creates the
+image root with newfs. There is no ZFS on DragonFly.
+
+  * Built with the stock DragonFly tooling: no patched /usr/src.
+  * The extra software comes from DPorts; the base system is the real thing.
+  * The desktop is X11 with Xfce and the LightDM greeter; there is no
+    Wayland anywhere.

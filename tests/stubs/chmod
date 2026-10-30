@@ -1,0 +1,50 @@
+#!/bin/sh
+#
+# tests/stubs/chmod — a stand-in for chmod(8) used by the test suite.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The options are the ones of chmod(1) (the man page of the BSD system):
+# -f, -h, -R, -H, -L, -P and -v. An option that is not on that list is
+# an error, so that a build.sh that asks chmod(1) for something it does
+# not know fails the test. The options of other systems (-c of GNU
+# coreutils, the long options of GNU) are NOT on that list: the build
+# runs on a BSD system.
+#
+# It records the call in $STUB_LOG and then applies it: the files of the
+# test belong to the user that runs the suite, so the mode can be set and
+# the test can check it.
+
+set -eu
+
+: "${STUB_LOG:=/dev/null}"
+printf 'CMD chmod %s\n' "$*" >> "$STUB_LOG"
+
+args=''
+while [ $# -gt 0 ]; do
+	case $1 in
+	-R | -H | -L | -P | -f | -h | -v) ;;
+	--)
+		args="$args $*"
+		break
+		;;
+	-*)
+		printf 'chmod: unknown option: %s\n' "$1" >&2
+		exit 2
+		;;
+	*)
+		args="$args $1"
+		;;
+	esac
+	shift
+done
+
+[ -n "$args" ] || {
+	printf 'chmod: no mode and no file\n' >&2
+	exit 2
+}
+
+# shellcheck disable=SC2086
+command -p chmod $args
+
+exit 0
