@@ -669,7 +669,8 @@ for p in $profiles; do
 	# overlay itself is never edited.
 	RCD="$PSUB/rc.conf.d"
 	rmrf "$RCD" "$OUT"
-	step mkdir -p "$RCD/base" "$RCD/profile" "$RCD/installed"
+	step mkdir -p "$RCD/base" "$RCD/profile" "$RCD/installed" \
+		"$RCD/sysctl/1-base" "$RCD/sysctl/2-profile"
 	if [ -d "$ROOT/overlay/base/rc.conf.d" ]; then
 		step cp -R "$ROOT/overlay/base/rc.conf.d/." "$RCD/base/"
 		subst_staged "$ROOT/overlay/base/rc.conf.d" "$RCD/base"
@@ -685,6 +686,19 @@ for p in $profiles; do
 		step cp -R "$_rci/." "$RCD/installed/"
 		subst_staged "$_rci" "$RCD/installed"
 	done
+	# the sysctl.conf(5) fragments (sysctl.conf.d): base and profile are
+	# staged apart (1-base, 2-profile) and merged in that order, so the
+	# profile wins for a name both set, whatever the file names;
+	# post-customize appends them to the stock sysctl.conf of the live
+	# media and of the installed system
+	if [ -d "$ROOT/overlay/base/sysctl.conf.d" ]; then
+		step cp -R "$ROOT/overlay/base/sysctl.conf.d/." "$RCD/sysctl/1-base/"
+		subst_staged "$ROOT/overlay/base/sysctl.conf.d" "$RCD/sysctl/1-base"
+	fi
+	if [ -d "$ROOT/overlay/profiles/$p/sysctl.conf.d" ]; then
+		step cp -R "$ROOT/overlay/profiles/$p/sysctl.conf.d/." "$RCD/sysctl/2-profile/"
+		subst_staged "$ROOT/overlay/profiles/$p/sysctl.conf.d" "$RCD/sysctl/2-profile"
+	fi
 	# DragonFly has no motd template mechanism: the live file is the motd
 	if [ -f "$ROOT/overlay/base/rootfs/etc/motd.template" ]; then
 		step cp "$SK/etc/motd.template" "$SK/etc/motd"
@@ -779,7 +793,7 @@ for p in $profiles; do
 	fi
 	step sh "$ROOT/tools/post-customize.sh" "$ISOROOT" \
 		"$RCD/base" "$RCD/profile" \
-		"$SK" ttyd0 comconsole "$_rmacct" "$_keepacct" "$RCD/installed"
+		"$SK" ttyd0 comconsole "$_rmacct" "$_keepacct" "$RCD/installed" "$RCD/sysctl"
 	step pwd_mkdb -p -d "$ISOROOT/etc" "$ISOROOT/etc/master.passwd"
 	step pwd_mkdb -p -d "$ISOROOT/etc.hdd" "$ISOROOT/etc.hdd/master.passwd"
 

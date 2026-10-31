@@ -1,0 +1,13 @@
+# overlay/profiles/desktop/sysctl.conf.d/evdev — keyboard events for X.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# sysctl.conf(5) lines (name=value). build.sh appends them, in a marked
+# block, to the stock /etc/sysctl.conf of the live media and of the
+# installed system (etc.hdd); the stock lines stay.
+#
+# 6 = kbdmux (2) + hardware mice (4): kbdmux receives every keyboard, so
+# Xorg gets keys even where it has only the kbdmux node (a bhyve guest),
+# and real hardware keyboards still work through kbdmux (the default 12
+# sends keys only to the hardware keyboard's own node).
+kern.evdev.rcpt_mask=6

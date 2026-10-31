@@ -2981,6 +2981,118 @@ else
 	no "(L5) the README says the installer's Reboot halts the machine and its screens say DragonFly BSD"
 fi
 
+# (K1) the keyboard under bhyve: the desktop sets kern.evdev.rcpt_mask=6
+#      (keys through kbdmux) in the sysctl.conf of the live media AND of
+#      the installed system (etc.hdd), appended to the stock file, which
+#      keeps its own lines; the appliance does not set it
+REAL_PROFILE=both realbuild "$work/k1" -u ciuser -k "$work/ci.pub" -P "$work/pass.hash"
+k1d="$realout/desktop/root"
+k1a="$realout/appliance/root"
+if [ "$realrc" -eq 0 ] &&
+	grep -qx 'kern.evdev.rcpt_mask=6' "$k1d/etc/sysctl.conf" 2>/dev/null &&
+	grep -qx 'kern.evdev.rcpt_mask=6' "$k1d/etc.hdd/sysctl.conf" 2>/dev/null; then
+	ok "(K1) the desktop sets kern.evdev.rcpt_mask=6 in the sysctl.conf of the live media and of the installed system"
+else
+	no "(K1) the desktop sets kern.evdev.rcpt_mask=6 in the sysctl.conf of the live media and of the installed system (rc=$realrc)"
+	grep -n 'evdev' "$k1d/etc/sysctl.conf" "$k1d/etc.hdd/sysctl.conf" 2>/dev/null | sed 's/^/      | /'
+fi
+if grep -qx '#security.bsd.see_other_uids=0' "$k1d/etc/sysctl.conf" 2>/dev/null &&
+	grep -qx '#security.bsd.see_other_uids=0' "$k1d/etc.hdd/sysctl.conf" 2>/dev/null &&
+	grep -qx '# from the overlay: sysctl.conf.d/evdev' "$k1d/etc.hdd/sysctl.conf" 2>/dev/null; then
+	ok "(K1) the stock sysctl.conf is appended to (its lines stay) below a marker of the fragment"
+else
+	no "(K1) the stock sysctl.conf is appended to (its lines stay) below a marker of the fragment"
+	sed 's/^/      | /' "$k1d/etc.hdd/sysctl.conf" 2>/dev/null
+fi
+if ! grep -qs 'kern.evdev.rcpt_mask' "$k1a/etc/sysctl.conf" "$k1a/etc.hdd/sysctl.conf"; then
+	ok "(K1) the appliance does not set kern.evdev.rcpt_mask"
+else
+	no "(K1) the appliance does not set kern.evdev.rcpt_mask"
+fi
+# idempotent: a second run, or a name already set, leaves one line
+k1r="$work/k1r"
+rm -rf "$k1r"; mkdir -p "$k1r/root/etc" "$k1r/root/etc.hdd" "$k1r/sk" "$k1r/sc"
+printf 'root::0:0::0:0::/root:/bin/sh\n' > "$k1r/root/etc/master.passwd"
+printf 'root:x:0:0::/root:/bin/sh\n' > "$k1r/root/etc/passwd"
+printf 'kern.evdev.rcpt_mask=12\n' > "$k1r/root/etc/sysctl.conf"
+cp "$repo/overlay/profiles/desktop/sysctl.conf.d/evdev" "$k1r/sc/evdev"
+for _k in 1 2; do
+	sh "$repo/tools/post-customize.sh" "$k1r/root" "$work/norc" "$work/norc" \
+		"$k1r/sk" ttyd0 comconsole - - - "$k1r/sc" > "$k1r/log" 2>&1
+done
+if [ "$(grep -c '^kern.evdev.rcpt_mask=' "$k1r/root/etc/sysctl.conf")" -eq 1 ] &&
+	grep -qx 'kern.evdev.rcpt_mask=6' "$k1r/root/etc/sysctl.conf" &&
+	[ "$(grep -c '^kern.evdev.rcpt_mask=' "$k1r/root/etc.hdd/sysctl.conf")" -eq 1 ]; then
+	ok "(K1) the sysctl merge is idempotent and replaces a name already set"
+else
+	no "(K1) the sysctl merge is idempotent and replaces a name already set"
+	sed 's/^/      | /' "$k1r/root/etc/sysctl.conf" "$k1r/log" 2>/dev/null
+fi
+
+# (K2) a sysctl fragment line that is not exactly name=value (a bare
+#      word, a space in the name, an empty value) stops post-customize
+#      with the message, before anything is written to sysctl.conf
+k2="$work/k2"
+for k2case in bare space empty backslash; do
+	rm -rf "$k2"; mkdir -p "$k2/root/etc" "$k2/root/etc.hdd" "$k2/sk" "$k2/sc/2-profile"
+	printf 'root::0:0::0:0::/root:/bin/sh\n' > "$k2/root/etc/master.passwd"
+	printf 'root:x:0:0::/root:/bin/sh\n' > "$k2/root/etc/passwd"
+	cp "$repo/tests/fixtures/release-root/etc/sysctl.conf" "$k2/root/etc/sysctl.conf"
+	cp "$k2/root/etc/sysctl.conf" "$k2/root/etc.hdd/sysctl.conf"
+	cp -R "$k2/root" "$k2/before"
+	case $k2case in
+	bare) printf 'kern.foo\n' > "$k2/sc/2-profile/bad" ;;
+	space) printf 'kern foo=1\n' > "$k2/sc/2-profile/bad" ;;
+	empty) printf 'kern.foo=\n' > "$k2/sc/2-profile/bad" ;;
+	# a backslash escape (\n): awk -v would turn it into a new line, so
+	# the name is also set already: check_sysctl must refuse the backslash
+	# before anything is written, so neither file changes
+	backslash)
+		printf 'kern.foo=a\\nb\n' > "$k2/sc/2-profile/bad"
+		printf 'kern.foo=old\n' >> "$k2/root/etc/sysctl.conf"
+		printf 'kern.foo=old\n' >> "$k2/root/etc.hdd/sysctl.conf"
+		rm -rf "$k2/before"
+		cp -R "$k2/root" "$k2/before"
+		;;
+	esac
+	sh "$repo/tools/post-customize.sh" "$k2/root" "$work/norc" "$work/norc" \
+		"$k2/sk" ttyd0 comconsole - - - "$k2/sc" > "$k2/log" 2>&1
+	k2rc=$?
+	if [ "$k2rc" -ne 0 ] && grep -q 'not a sysctl.conf(5) line' "$k2/log" &&
+		cmp -s "$k2/before/etc/sysctl.conf" "$k2/root/etc/sysctl.conf" &&
+		cmp -s "$k2/before/etc.hdd/sysctl.conf" "$k2/root/etc.hdd/sysctl.conf"; then
+		ok "(K2) a sysctl fragment with a $k2case line is refused and sysctl.conf is not written"
+	else
+		no "(K2) a sysctl fragment with a $k2case line is refused and sysctl.conf is not written (rc=$k2rc)"
+		sed 's/^/      | /' "$k2/log" "$k2/root/etc/sysctl.conf" 2>/dev/null
+	fi
+done
+
+# (K3) base then profile: base sets a name in the fragment zz, the
+#      profile sets it in the fragment aa; the profile's value wins
+rm -rf "$k2"; mkdir -p "$k2/root/etc" "$k2/root/etc.hdd" "$k2/sk" "$k2/sc/1-base" "$k2/sc/2-profile"
+printf 'root::0:0::0:0::/root:/bin/sh\n' > "$k2/root/etc/master.passwd"
+printf 'root:x:0:0::/root:/bin/sh\n' > "$k2/root/etc/passwd"
+cp "$repo/tests/fixtures/release-root/etc/sysctl.conf" "$k2/root/etc/sysctl.conf"
+printf 'kern.foo=1\n' > "$k2/sc/1-base/zz"
+printf 'kern.foo=2\n' > "$k2/sc/2-profile/aa"
+sh "$repo/tools/post-customize.sh" "$k2/root" "$work/norc" "$work/norc" \
+	"$k2/sk" ttyd0 comconsole - - - "$k2/sc" > "$k2/log" 2>&1
+if grep -qx 'kern.foo=2' "$k2/root/etc/sysctl.conf" 2>/dev/null &&
+	[ "$(grep -c '^kern.foo=' "$k2/root/etc/sysctl.conf")" -eq 1 ]; then
+	ok "(K3) the profile's sysctl value wins over the base's, whatever the file names"
+else
+	no "(K3) the profile's sysctl value wins over the base's, whatever the file names"
+	sed 's/^/      | /' "$k2/root/etc/sysctl.conf" "$k2/log" 2>/dev/null
+fi
+if [ -f "$work/k1/out/desktop/rc.conf.d/sysctl/2-profile/evdev" ] &&
+	[ -d "$work/k1/out/desktop/rc.conf.d/sysctl/1-base" ]; then
+	ok "(K3) the build stages the base and profile sysctl fragments apart (1-base, 2-profile)"
+else
+	no "(K3) the build stages the base and profile sysctl fragments apart (1-base, 2-profile)"
+	ls -R "$work/k1/out/desktop/rc.conf.d/sysctl" 2>/dev/null | sed 's/^/      | /'
+fi
+
 # (1) the first-boot sentinel: an ISO build's release root (the tree of
 #      the read-only ISO) holds no /firstboot, so the stock /etc/rc never
 #      tries to remove it there
