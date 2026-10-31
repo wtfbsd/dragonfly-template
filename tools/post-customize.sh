@@ -5,7 +5,7 @@
 # Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
 #
 # usage: tools/post-customize.sh ROOT RC_CONF_DIR RC_CONF_DIR2 ROOTSKELS \
-#          GETTY CONSOLE REMOVE_ACCOUNT KEEP_ACCOUNT
+#          GETTY CONSOLE REMOVE_ACCOUNT KEEP_ACCOUNT [RC_CONF_INSTALLED]
 #
 #   ROOT             the release root of the nrelease run (${ISOROOT})
 #   RC_CONF_DIR      a directory of rc.conf(5) fragments (KEY="value" lines)
@@ -17,6 +17,13 @@
 #   KEEP_ACCOUNT     an account with uid 0 that is NOT locked on the live
 #                    media (the installer account of the desktop ISO, which
 #                    is the install path), or - for none
+#   RC_CONF_INSTALLED a directory of fragments for the INSTALLED system
+#                    only (etc.hdd/rc.conf), or - for none. They reach the
+#                    rc.conf of the live tree too when the live tree is
+#                    itself the system (no installer account left in it,
+#                    the appliance image). The desktop puts LightDM here:
+#                    the live media has no greeter, so the stock installer
+#                    keeps ttyv0 and ttyd0.
 #
 # The step runs in the release root between the release of the media and
 # the media that are built from the release root. It does what the release
@@ -57,11 +64,11 @@ log() { printf '%s\n' "$*"; }
 die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 
 usage() {
-	log "usage: $PROG ROOT RC_CONF_DIR RC_CONF_DIR2 ROOTSKELS GETTY CONSOLE REMOVE_ACCOUNT KEEP_ACCOUNT" >&2
+	log "usage: $PROG ROOT RC_CONF_DIR RC_CONF_DIR2 ROOTSKELS GETTY CONSOLE REMOVE_ACCOUNT KEEP_ACCOUNT [RC_CONF_INSTALLED]" >&2
 	exit 2
 }
 
-[ $# -ge 7 ] && [ $# -le 8 ] || usage
+[ $# -ge 7 ] && [ $# -le 9 ] || usage
 ROOT=$1
 RC1=$2
 RC2=${3:-}
@@ -70,6 +77,7 @@ GETTY=${5:-}
 CONSOLE=${6:-}
 REMOVE=${7:--}
 KEEP=${8:--}
+RCI=${9:--}
 
 [ -d "$ROOT" ] || die "no such release root: $ROOT"
 
@@ -261,6 +269,18 @@ remove_account "$ROOT/etc/master.passwd" "$ROOT/etc/passwd" "$REMOVE"
 lock_uid0 "$ROOT/etc/master.passwd" "$KEEP"
 # the installed system has no account that can be typed into
 lock_uid0 "$ROOT/etc.hdd/master.passwd"
+
+# the fragments of the installed system only: always into etc.hdd, and
+# into the live tree only when it carries no installer account (then the
+# image is booted as the system itself, like the appliance image)
+# This runs after REMOVE_ACCOUNT: an appliance image has lost its installer
+# account by now, so it also gets the installed-only fragments (test L2a).
+if [ "$RCI" != - ]; then
+	merge_rc_conf "$ROOT/etc.hdd/rc.conf" "$RCI"
+	if [ -f "$ROOT/etc/master.passwd" ] && ! grep -q '^installer:' "$ROOT/etc/master.passwd"; then
+		merge_rc_conf "$ROOT/etc/rc.conf" "$RCI"
+	fi
+fi
 
 log 'post-customize: done'
 exit 0

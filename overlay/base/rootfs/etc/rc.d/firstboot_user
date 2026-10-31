@@ -30,9 +30,21 @@
 # an installed system. The configuration file is the guard this script
 # relies upon; the sentinel is removed once the provisioning is done.
 #
-# The live media (the ISO) has a read-only home directory: the script
-# says so and creates nothing there. The account is provisioned on the
-# installed system, whose home directory is writable.
+# The live media never consume the configuration: the installer copies
+# /boot to the installed system, and the configuration has to reach it
+# unchanged. The live media are told apart by the installer account the
+# release tooling adds to them (customizeiso: pw useradd installer -o -u
+# 0; the stock installer logs in as installer on ttyv0 and ttyd0). The
+# installed system has no such account (the installer copies etc.hdd,
+# where it does not exist), and neither has an image that is booted as
+# the system itself (the appliance image, from which build.sh removes
+# it). The writable root of the .img live media does not tell them apart.
+# A home directory that is not writable (the cd9660 ISO) is a second
+# guard: the script says so and creates nothing there.
+#
+# rcorder: DragonFly has no FILESYSTEMS placeholder (rcorder warns "has no
+# providers"); the local and remote file systems are mounted once
+# mountcritremote has run.
 #
 # With a PASSWORD_HASH the hash is fed to pw(8) over stdin; without one
 # the password stays '*' (the pw useradd default) so that key login
@@ -42,7 +54,7 @@
 # /usr/local/etc/doas.conf with "permit persist :wheel".
 
 # PROVIDE: firstboot_user
-# REQUIRE: FILESYSTEMS NETWORKING
+# REQUIRE: mountcritremote NETWORKING
 # BEFORE: LOGIN
 # KEYWORD: nojail
 
@@ -209,6 +221,13 @@ $_v"
 
 	# pass 2: apply
 	#
+	# The live media: the configuration stays, untouched, for the
+	# installed system (see the top of this file).
+	if grep -q '^installer:' /etc/master.passwd 2> /dev/null; then
+		note "this is the live media (it has the installer account): the account $_user is created on the installed system, and $_conf stays for it"
+		return 0
+	fi
+
 	# The live media has a read-only home directory (the ISO is a
 	# cd9660 file system): the account is provisioned on the INSTALLED
 	# system, where the home directory is writable. The script says so

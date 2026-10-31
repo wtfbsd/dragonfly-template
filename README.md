@@ -46,8 +46,11 @@ Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see `LICENSE`).
 │   └── profiles/
 │       ├── appliance/          headless: packages.list, rc.conf.d/sshd,
 │       │                       etc/ssh/sshd_config
-│       └── desktop/            X11 only: packages.list, rc.conf.d/{dbus,lightdm,sshd},
-│                               the LightDM configuration
+│       └── desktop/            X11 only: packages.list, rc.conf.d/{dbus,sshd},
+│                               rc.conf.installed.d/lightdm, the LightDM
+│                               configuration, the scfb X fallback
+│                               (the software-framebuffer X driver, so X11
+│                               starts on a VM or machine without a GPU driver)
 ├── tests/
 │   ├── run-tests.sh            the checks (no root, no network, no VM)
 │   ├── boot-test.sh            boots a media and waits until it is usable
@@ -78,6 +81,13 @@ Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see `LICENSE`).
   variable per file. DragonFly's `rc.conf(5)` is a single file like
   FreeBSD's, so `build.sh` merges the fragments into the `rc.conf` of
   the release root; the fragments themselves are not shipped in the media.
+- `rc.conf.installed.d` fragments (base, then profile) follow the same
+  rules but reach **only the installed system** (`etc.hdd/rc.conf`). Put
+  there what must not run on the live media. The desktop does this with
+  `lightdm`: a greeter on the live media would own the display, and the
+  live media has to boot to the stock installer. An image that is booted as
+  the system itself (the appliance, which has no `installer` account) gets
+  these fragments in its own `rc.conf` as well.
   DragonFly has no `rc_configured`, and nothing of this repository asks
   for it.
 - **Every account with uid 0 is locked** in the staged image: the stock
@@ -214,10 +224,37 @@ among them, so a script that is guarded by that keyword never runs on an
 installed system. The configuration file is the guard the script relies
 upon; the sentinel is removed when the provisioning is done.
 
-**On the live media the account is not created:** the ISO has a read-only
-home directory (a cd9660 file system), so the script says so and creates
-nothing there. The installed system has a writable home directory and
-provisions the account on its first boot.
+**On the live media the account is not created, and the configuration
+is left as it is:** the installer copies `/boot` to the installed system,
+so the configuration has to reach it unchanged. The script recognises the
+live media by the `installer` account that the release tooling adds to
+it. The root of the `.img` live media is writable, so a writable root is
+not a sign of an installed system. The installed system has no
+`installer` account, and it provisions the account on its first boot and
+renames the configuration to `.done`. An image that is booted as the
+system itself (the appliance, from which `build.sh` removes the
+`installer` account) provisions on its own first boot. A home directory
+that is not writable (the cd9660 ISO) is only a fallback: every live
+media built by this template carries the `installer` account, so in
+practice that account is the one signal.
+
+## Installing from the live media
+
+The live desktop media does not start the greeter. It boots to the
+login prompt of the stock DragonFly installer, on the console (`ttyv0`)
+and on the serial line (`ttyd0`). Log in as `installer`, with no
+password, to start it. LightDM is switched on only for the installed
+system. Over VNC, the console is the screen you see; there is no need
+for Ctrl+Alt+F1.
+
+Things a forker should expect from the stock installer:
+
+- its screens say "DragonFly BSD", not the name of your product. The
+  installer is part of the base system, and this template does not patch
+  it;
+- "Reboot this Computer" halts the machine rather than rebooting it.
+  Press a key on the console, or power-cycle the VM or machine, to boot
+  the installed system.
 
 For CI and test images, `build.sh` bakes the same configuration in:
 

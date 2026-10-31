@@ -669,7 +669,7 @@ for p in $profiles; do
 	# overlay itself is never edited.
 	RCD="$PSUB/rc.conf.d"
 	rmrf "$RCD" "$OUT"
-	step mkdir -p "$RCD/base" "$RCD/profile"
+	step mkdir -p "$RCD/base" "$RCD/profile" "$RCD/installed"
 	if [ -d "$ROOT/overlay/base/rc.conf.d" ]; then
 		step cp -R "$ROOT/overlay/base/rc.conf.d/." "$RCD/base/"
 		subst_staged "$ROOT/overlay/base/rc.conf.d" "$RCD/base"
@@ -678,6 +678,13 @@ for p in $profiles; do
 		step cp -R "$ROOT/overlay/profiles/$p/rc.conf.d/." "$RCD/profile/"
 		subst_staged "$ROOT/overlay/profiles/$p/rc.conf.d" "$RCD/profile"
 	fi
+	# the fragments of the installed system only (rc.conf.installed.d):
+	# base first, then the profile, so that the profile wins
+	for _rci in "$ROOT/overlay/base/rc.conf.installed.d" "$ROOT/overlay/profiles/$p/rc.conf.installed.d"; do
+		[ -d "$_rci" ] || continue
+		step cp -R "$_rci/." "$RCD/installed/"
+		subst_staged "$_rci" "$RCD/installed"
+	done
 	# DragonFly has no motd template mechanism: the live file is the motd
 	if [ -f "$ROOT/overlay/base/rootfs/etc/motd.template" ]; then
 		step cp "$SK/etc/motd.template" "$SK/etc/motd"
@@ -727,6 +734,10 @@ for p in $profiles; do
 			} > "$conf"
 			chmod 600 "$conf"
 		' sh "$SK/boot/firstboot-user.conf" "$FBUSER" "$FBKEY" "$FBPASS"
+		# the release tooling copies the rootskels with their owner: the
+		# /boot of the image and the configuration belong to root:wheel,
+		# never to the user who checked the template out
+		step chown root:wheel "$SK/boot" "$SK/boot/firstboot-user.conf"
 	fi
 
 	# 2. the release: the world (once for the whole build), the release
@@ -768,7 +779,7 @@ for p in $profiles; do
 	fi
 	step sh "$ROOT/tools/post-customize.sh" "$ISOROOT" \
 		"$RCD/base" "$RCD/profile" \
-		"$SK" ttyd0 comconsole "$_rmacct" "$_keepacct"
+		"$SK" ttyd0 comconsole "$_rmacct" "$_keepacct" "$RCD/installed"
 	step pwd_mkdb -p -d "$ISOROOT/etc" "$ISOROOT/etc/master.passwd"
 	step pwd_mkdb -p -d "$ISOROOT/etc.hdd" "$ISOROOT/etc.hdd/master.passwd"
 

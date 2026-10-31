@@ -1045,7 +1045,7 @@ fi
 
 # rc.conf fragments are named after the service that reads them
 misnamed=''
-for f in $(find "$repo/overlay" -type f -path '*rc.conf.d/*'); do
+for f in $(find "$repo/overlay" -type f \( -path '*rc.conf.d/*' -o -path '*rc.conf.installed.d/*' \)); do
 	base=${f##*/}
 	case $base in
 	appliance | desktop | examplebsd | dragonfly) misnamed="$misnamed $base" ;;
@@ -1058,10 +1058,10 @@ else
 fi
 
 for svc in hostname sshd dbus lightdm; do
-	if [ -n "$(find "$repo/overlay" -type f -path "*rc.conf.d/$svc" 2>/dev/null)" ]; then
-		ok "rc.conf.d/$svc exists"
+	if [ -n "$(find "$repo/overlay" -type f \( -path "*rc.conf.d/$svc" -o -path "*rc.conf.installed.d/$svc" \) 2>/dev/null)" ]; then
+		ok "rc.conf.d/$svc (or rc.conf.installed.d/$svc) exists"
 	else
-		no "rc.conf.d/$svc exists"
+		no "rc.conf.d/$svc (or rc.conf.installed.d/$svc) exists"
 	fi
 done
 
@@ -1276,6 +1276,7 @@ exit 0
 FAKECHOWN
 chmod 755 "$work/fakebin/pw" "$work/fakebin/logger" "$work/fakebin/chown"
 sed -e 's#/etc/rc\.subr#@R@/etc/rc.subr#g' \
+	-e 's#/etc/master\.passwd#@R@/etc/master.passwd#g' \
 	-e 's#/etc/passwd#@R@/etc/passwd#g' \
 	-e 's#/boot/firstboot-user\.conf#@R@/boot/firstboot-user.conf#g' \
 	-e 's#/usr/local/etc/doas\.conf#@R@/usr/local/etc/doas.conf#g' \
@@ -2005,6 +2006,7 @@ else
 	mkdir -p "$work/fbro/etc/rc.d" "$work/fbro/boot" "$work/fbro/usr/local/etc" "$work/fbro/home"
 	cp "$work/fbroot/etc/rc.subr" "$work/fbro/etc/rc.subr"
 	sed -e 's#/etc/rc\.subr#@R@/etc/rc.subr#g' \
+		-e 's#/etc/master\.passwd#@R@/etc/master.passwd#g' \
 		-e 's#/etc/passwd#@R@/etc/passwd#g' \
 		-e 's#/boot/firstboot-user\.conf#@R@/boot/firstboot-user.conf#g' \
 		-e 's#/usr/local/etc/doas\.conf#@R@/usr/local/etc/doas.conf#g' \
@@ -2637,6 +2639,7 @@ chmod 755 "$fb/etc/rc.subr" "$fb/fakebin/pw" "$fb/fakebin/logger" "$fb/fakebin/c
 # the DRM device and every path the script touches are pointed at the
 # sandbox, so that the test controls both states of the gate
 sed -e 's#/etc/rc\.subr#@R@/etc/rc.subr#g' \
+	-e 's#/etc/master\.passwd#@R@/etc/master.passwd#g' \
 	-e 's#/etc/passwd#@R@/etc/passwd#g' \
 	-e 's#/boot/firstboot-user\.conf#@R@/boot/firstboot-user.conf#g' \
 	-e 's#/usr/local/etc/doas\.conf#@R@/usr/local/etc/doas.conf#g' \
@@ -2835,6 +2838,147 @@ if [ $? -eq 0 ]; then
 else
 	no "(F4) GETTY=ttyv0 (the virtual console of DragonFly) is accepted"
 	sed 's/^/      | /' "$d4bad/log2" 2>/dev/null
+fi
+
+# (L1) the live media never consume the first-boot configuration: the
+#      .img live media has a writable root and /home, and the installer
+#      copies /boot, so the live media is told apart by the installer
+#      account of the release tooling. On the live media: no useradd, the
+#      configuration untouched, the X fallback installed all the same. On
+#      the installed system (no installer account): the user is created
+#      and the configuration renamed to .done.
+cat > "$fb/fakebin/pw" <<FAKEPW
+#!/bin/sh
+printf 'pw %s\n' "\$*" >> "$fb/pw.log"
+case \${1:-} in
+usershow) exit 1 ;;
+esac
+exit 0
+FAKEPW
+chmod 755 "$fb/fakebin/pw"
+printf 'root:*:0:0::0:0:Charlie &:/root:/bin/sh\ninstaller::0:0::0:0:DragonFly Installer:/root:/usr/sbin/installer\n' \
+	> "$fb/etc/master.passwd"
+: > "$fb/pw.log"
+rm -f "$fbxdst"
+fbsetup no yes
+cp "$fb/boot/firstboot-user.conf" "$fb/l1.conf" 2>/dev/null
+printf 'USERNAME=ciuser\nSSH_KEY=%s %s testkey\n' 'ssh-ed25519' 'AAAAtest' > "$fb/l1.want"
+if [ "$fbrc" -eq 0 ] && [ ! -s "$fb/pw.log" ] && cmp -s "$fb/boot/firstboot-user.conf" "$fb/l1.want" &&
+	[ ! -e "$fb/boot/firstboot-user.conf.done" ] && [ -f "$fb/firstboot" ] &&
+	grep -q 'this is the live media' "$fb/fb.log"; then
+	ok "(L1) on the live media (installer account, writable /home) no user is created and the configuration stays untouched"
+else
+	no "(L1) on the live media (installer account, writable /home) no user is created and the configuration stays untouched (rc=$fbrc)"
+	sed 's/^/      | /' "$fb/fb.log" "$fb/pw.log" 2>/dev/null
+fi
+if [ -f "$fbxdst" ]; then
+	ok "(L1) the X fallback is installed on the live media all the same"
+else
+	no "(L1) the X fallback is installed on the live media all the same"
+fi
+printf 'root:*:0:0::0:0:Charlie &:/root:/bin/sh\n' > "$fb/etc/master.passwd"
+: > "$fb/pw.log"
+fbsetup no yes
+if [ "$fbrc" -eq 0 ] && grep -q '^pw useradd -n ciuser' "$fb/pw.log" &&
+	[ -f "$fb/boot/firstboot-user.conf.done" ] && [ ! -e "$fb/boot/firstboot-user.conf" ]; then
+	ok "(L1) on the installed system (no installer account) the user is created and the configuration renamed to .done"
+else
+	no "(L1) on the installed system (no installer account) the user is created and the configuration renamed to .done (rc=$fbrc)"
+	sed 's/^/      | /' "$fb/fb.log" "$fb/pw.log" 2>/dev/null
+fi
+rm -f "$fb/etc/master.passwd"
+
+# (L2) LightDM is off on the live media and on in the installed system:
+#      the live desktop boots to the stock installer on ttyv0 and ttyd0
+REAL_PROFILE=desktop realbuild "$work/l2" -u ciuser -P "$work/pass.hash"
+if [ "$realrc" -eq 0 ] &&
+	! grep -q '^lightdm_enable="YES"' "$realout/desktop/root/etc/rc.conf" 2>/dev/null &&
+	grep -q '^lightdm_enable="YES"$' "$realout/desktop/root/etc.hdd/rc.conf" 2>/dev/null; then
+	ok "(L2) the desktop enables LightDM only in the rc.conf of the installed system (etc.hdd)"
+else
+	no "(L2) the desktop enables LightDM only in the rc.conf of the installed system (etc.hdd) (rc=$realrc)"
+	grep -n 'lightdm' "$realout/desktop/root/etc/rc.conf" "$realout/desktop/root/etc.hdd/rc.conf" 2>/dev/null | sed 's/^/      | /'
+fi
+# an image booted as the system itself (no installer account) gets the
+# installed-only fragments in its own rc.conf as well
+l2r="$work/l2r"
+rm -rf "$l2r"; mkdir -p "$l2r/root/etc" "$l2r/root/etc.hdd" "$l2r/root/boot" "$l2r/sk" "$l2r/inst"
+printf 'root::0:0::0:0::/root:/bin/sh\n' > "$l2r/root/etc/master.passwd"
+cp "$l2r/root/etc/master.passwd" "$l2r/root/etc.hdd/master.passwd"
+printf 'root:x:0:0::/root:/bin/sh\n' > "$l2r/root/etc/passwd"
+printf 'hostname="localhost"\n' > "$l2r/root/etc/rc.conf"
+cp "$l2r/root/etc/rc.conf" "$l2r/root/etc.hdd/rc.conf"
+printf 'foo_enable="YES"\n' > "$l2r/inst/foo"
+sh "$repo/tools/post-customize.sh" "$l2r/root" "$work/norc" "$work/norc" \
+	"$l2r/sk" ttyd0 comconsole - - "$l2r/inst" > "$l2r/log" 2>&1
+if grep -q '^foo_enable="YES"$' "$l2r/root/etc/rc.conf" && grep -q '^foo_enable="YES"$' "$l2r/root/etc.hdd/rc.conf"; then
+	ok "(L2) an image without the installer account gets the installed-only fragments in its own rc.conf"
+else
+	no "(L2) an image without the installer account gets the installed-only fragments in its own rc.conf"
+	sed 's/^/      | /' "$l2r/log"
+fi
+# the appliance case: the live tree carries the installer account of the
+# release tooling and post-customize removes it (REMOVE_ACCOUNT=installer).
+# The account is gone, and since the tree is then the system itself, the
+# installed-only fragments reach its own rc.conf (they are merged after
+# the account handling).
+l2a="$work/l2a"
+rm -rf "$l2a"; mkdir -p "$l2a/root/etc" "$l2a/root/etc.hdd" "$l2a/root/boot" "$l2a/sk" "$l2a/inst"
+printf 'root::0:0::0:0::/root:/bin/sh\ninstaller::0:0::0:0:DragonFly Installer:/root:/usr/sbin/installer\n' > "$l2a/root/etc/master.passwd"
+printf 'root::0:0::0:0::/root:/bin/sh\n' > "$l2a/root/etc.hdd/master.passwd"
+printf 'root:x:0:0::/root:/bin/sh\ninstaller:x:0:0:DragonFly Installer:/root:/usr/sbin/installer\n' > "$l2a/root/etc/passwd"
+printf 'hostname="localhost"\n' > "$l2a/root/etc/rc.conf"
+cp "$l2a/root/etc/rc.conf" "$l2a/root/etc.hdd/rc.conf"
+printf 'foo_enable="YES"\n' > "$l2a/inst/foo"
+sh "$repo/tools/post-customize.sh" "$l2a/root" "$work/norc" "$work/norc" \
+	"$l2a/sk" ttyd0 comconsole installer - "$l2a/inst" > "$l2a/log" 2>&1
+l2arc=$?
+if [ "$l2arc" -eq 0 ] && ! grep -q '^installer:' "$l2a/root/etc/master.passwd" &&
+	! grep -q '^installer:' "$l2a/root/etc/passwd"; then
+	ok "(L2) REMOVE_ACCOUNT=installer removes the installer account from master.passwd and passwd"
+else
+	no "(L2) REMOVE_ACCOUNT=installer removes the installer account from master.passwd and passwd (rc=$l2arc)"
+	sed 's/^/      | /' "$l2a/log" "$l2a/root/etc/master.passwd" "$l2a/root/etc/passwd" 2>/dev/null
+fi
+if grep -q '^foo_enable="YES"$' "$l2a/root/etc/rc.conf" && grep -q '^foo_enable="YES"$' "$l2a/root/etc.hdd/rc.conf"; then
+	ok "(L2) the appliance case: once the installer account is removed, the installed-only fragments reach the live rc.conf"
+else
+	no "(L2) the appliance case: once the installer account is removed, the installed-only fragments reach the live rc.conf"
+	sed 's/^/      | /' "$l2a/root/etc/rc.conf" "$l2a/log" 2>/dev/null
+fi
+if grep -qi 'installer' "$repo/README.md" && grep -q 'ttyv0' "$repo/README.md" &&
+	grep -q 'Log in as `installer`' "$repo/README.md"; then
+	ok "(L2) the README says the installer runs on ttyv0 and ttyd0 as installer"
+else
+	no "(L2) the README says the installer runs on ttyv0 and ttyd0 as installer"
+fi
+
+# (L3) the staged /boot and the configuration belong to root:wheel: the
+#      release tooling copies the rootskels with their owner
+if grep -qF "CMD chown root:wheel $work/l2/out/desktop/rootskels/boot $work/l2/out/desktop/rootskels/boot/firstboot-user.conf" \
+	"$work/l2/stub.log" 2>/dev/null; then
+	ok "(L3) the staged /boot and the first-boot configuration are given to root:wheel"
+else
+	no "(L3) the staged /boot and the first-boot configuration are given to root:wheel"
+	grep 'chown.*boot' "$work/l2/stub.log" 2>/dev/null | sed 's/^/      | /'
+fi
+
+# (L4) rcorder: DragonFly has no FILESYSTEMS placeholder (the real boot
+#      warns "requirement FILESYSTEMS ... has no providers"); the script
+#      requires mountcritremote, the last of the mount scripts
+l4=$(grep '^# REQUIRE:' "$repo/overlay/base/rootfs/etc/rc.d/firstboot_user")
+case " $l4 " in
+*' FILESYSTEMS '*) no "(L4) the first-boot script requires no FILESYSTEMS (DragonFly has no provider): $l4" ;;
+*' mountcritremote '*) ok "(L4) the first-boot script requires mountcritremote, not FILESYSTEMS" ;;
+*) no "(L4) the first-boot script requires mountcritremote, not FILESYSTEMS: $l4" ;;
+esac
+
+# (L5) the README warns about the stock installer: its Reboot halts the
+#      machine, and its screens say "DragonFly BSD"
+if grep -q 'halts the machine' "$repo/README.md" && grep -q 'say "DragonFly BSD"' "$repo/README.md"; then
+	ok "(L5) the README says the installer's Reboot halts the machine and its screens say DragonFly BSD"
+else
+	no "(L5) the README says the installer's Reboot halts the machine and its screens say DragonFly BSD"
 fi
 
 # (1) the first-boot sentinel: an ISO build's release root (the tree of

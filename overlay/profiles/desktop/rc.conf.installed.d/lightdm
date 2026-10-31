@@ -1,0 +1,12 @@
+# overlay/profiles/desktop/rc.conf.installed.d/lightdm — the greeter of
+# the installed desktop.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# One rc.conf(5) variable per file. The fragments of rc.conf.installed.d
+# reach ONLY the rc.conf of the installed system (etc.hdd/rc.conf): the
+# live media boot to the stock installer on ttyv0 and ttyd0 (log in as
+# installer), and a greeter there would own the display. The installed
+# desktop boots to the LightDM greeter on X11.
+#
+lightdm_enable="YES"
