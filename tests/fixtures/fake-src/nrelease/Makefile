@@ -19,8 +19,12 @@
 # (?=, += and the command line), so that a build.sh that forgets the
 # skeleton of the release tooling loses it.
 #
-# "gui" is a MODIFIER of the release (make gui release), not a target of
-# its own, so it is not declared here.
+# "gui", "nopkgs" and "binpkgs" modify the release (make binpkgs
+# release): upstream declares them as targets with no commands
+# (gui nopkgs binpkgs:) and tests them with make(...). gui adds the
+# skeleton of the GUI to ROOTSKELS; with binpkgs the packages are
+# installed with pkg (by name, then by origin); without it every DPorts
+# origin is built with make install in a chroot.
 
 REQ_ROOTSKELS=	${.CURDIR}/root
 ROOTSKELS?=	${REQ_ROOTSKELS}
@@ -61,3 +65,5 @@ mkimg:
 
 release:
 	@echo "release"
+
+gui nopkgs binpkgs:

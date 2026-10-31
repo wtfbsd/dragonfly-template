@@ -10,11 +10,12 @@
 #   DPORTS_EXTRA_PACKAGES="<the packages of the base list and of the
 #                            profile list>"
 #
-# The names are DPorts origins and not bare package names: dsynth takes
-# origins only (category/port), and a bare name is only understood under
-# the binpkgs modifier of the release tooling, which this template does
-# not use. The release tooling builds them from the DPorts tree, whose
-# path is DPORTS_PATH (/usr/dports by default).
+# The names are DPorts origins (category/port). With the binpkgs
+# modifier of the release tooling (the default, BINPKGS=yes) nrelease
+# installs binary packages with pkg, by name and then by origin; without
+# it (BINPKGS=no) it runs make install for every DPorts origin in a
+# chroot, from the DPorts tree whose path is DPORTS_PATH (/usr/dports by
+# default).
 #
 # The desktop is X11 with Xfce and the LightDM greeter; there is no
 # Wayland anywhere in this distribution.

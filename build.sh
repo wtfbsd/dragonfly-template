@@ -75,12 +75,13 @@
 # DragonFly itself. build.sh refuses the real build on any other host;
 # the dry run (-n) works anywhere.
 #
-# The packages of the overlay are DPorts ORIGINS (category/port): dsynth
-# takes origins only, and a bare name is only understood under the
-# binpkgs modifier of the release tooling. The release tooling builds
-# them from the DPorts tree, whose path is DPORTS_PATH (/usr/dports by
-# default); the check target of the release tooling refuses to build
-# without it.
+# The packages of the overlay are DPorts ORIGINS (category/port). With
+# the binpkgs modifier of the release tooling (the default, BINPKGS=yes)
+# nrelease 6.4 installs binary packages with pkg, by name and then by
+# origin; without it (BINPKGS=no) it runs make install for every DPorts
+# origin in a chroot, from the DPorts tree whose path is DPORTS_PATH
+# (/usr/dports by default). The check target of the release tooling
+# refuses to build without that tree.
 #
 # The root filesystem of the release image is UFS: the release tooling
 # creates the image root with newfs. HAMMER2 is the native filesystem of
@@ -394,9 +395,10 @@ esac
 [ "$DISTRO_ARCH" = amd64 ] \
 	|| die "DISTRO_ARCH must be amd64 for dragonfly (got: ${DISTRO_ARCH:-<empty>}); the per_os row of questions.yaml lists amd64 only"
 
-# The DPorts tree the packages are built from. The release tooling
-# refuses to build without it (its check target), and the build names
-# it, so that the plan of the dry run shows it.
+# The DPorts tree of the build host: BINPKGS=no builds the packages from
+# it. The release tooling refuses to build without it (its check
+# target), and the build names it, so that the plan of the dry run shows
+# it.
 DPORTS_PATH=${DPORTS_PATH:-/usr/dports}
 
 # the output directory is the base of every artifact path, so it is made
@@ -543,13 +545,37 @@ both) profiles='appliance desktop' ;;
 *) profiles=$PROF ;;
 esac
 
+# The desktop ships a disk image by default, because the DragonFly 6.4
+# EFI loader cannot read past 2 GiB of an ISO9660 image. DFLY_MEDIA=iso
+# asks for the ISO after all (and the plan warns about the 2 GiB limit).
+# The knob is DFLY_MEDIA, not MEDIA: an unrelated MEDIA in the
+# environment is ignored and never stops the build.
+DFLY_MEDIA_KNOB=${DFLY_MEDIA:-img}
+case $DFLY_MEDIA_KNOB in
+img | iso) ;;
+*) die "DFLY_MEDIA must be 'img' or 'iso' (got: $DFLY_MEDIA_KNOB)" ;;
+esac
+
+# The packages of the release. BINPKGS=yes (the default) hands the
+# binpkgs modifier of the release tooling to both make calls: nrelease
+# installs binary packages with pkg (by name, then by origin), which is
+# fast. BINPKGS=no hands no modifier: nrelease runs make install for every
+# DPorts origin in a chroot (many hours for xorg/xfce4). The modifier is a
+# bare word on the command line, not a KEY=value.
+BINPKGS=${BINPKGS:-yes}
+case $BINPKGS in
+yes) BINPKGS_ARG='binpkgs' ;;
+no) BINPKGS_ARG='' ;;
+*) die "BINPKGS must be 'yes' or 'no' (got: $BINPKGS)" ;;
+esac
+
 log ''
 log 'plan:'
 log "  distro   $DISTRO_NAME ($DISTRO_SLUG), dragonfly/$DISTRO_ARCH"
 log "  rootfs   $FILESYSTEM_ROOT (the root of the release image is UFS)"
 log "  profile  $PROF (package set: $PACKAGE_SET, installer: $INSTALLER)"
 log "  src      $SRC (unmodified; the release tooling builds the world)"
-log "  dports   $DPORTS_PATH (the tree the packages are built from)"
+log "  dports   $DPORTS_PATH (the DPorts tree; BINPKGS=no builds the packages from it)"
 log "  out      $OUT"
 if [ -n "$FBUSER" ]; then
 	log "  login    the first-boot user $FBUSER"
@@ -572,30 +598,49 @@ for p in $profiles; do
 	ISOFILE="$PSUB/$DISTRO_SLUG-$p-$DISTRO_ARCH.iso"
 	IMGFILE="$PSUB/$DISTRO_SLUG-$p-$DISTRO_ARCH.img"
 
-	# the media of the profile: the desktop is an ISO, the appliance a
-	# disk image. Both are named here and never looked for with a glob.
-	case $p in
-	desktop) MEDIA=$ISOFILE ;;
-	*) MEDIA=$IMGFILE ;;
-	esac
+	# the media of the profile, and the ones built. The appliance ships a
+	# disk image. The desktop ships one too, by default, because the
+	# DragonFly 6.4 EFI loader cannot read past 2 GiB of an ISO9660 image
+	# (a 3.9 GB desktop ISO from nrelease puts /boot past 3 GiB, so the
+	# loader cannot load the kernel: upstream ships its GUI release as
+	# .img for that reason). DFLY_MEDIA=iso asks for the ISO after all.
+	# The choice is made once: the targets of the media, the media
+	# shipped, and the note of the desktop ISO all come from it. The
+	# appliance also builds its ISO (the install media) and ships the
+	# disk image.
+	if [ "$p" = desktop ] && [ "$DFLY_MEDIA_KNOB" = iso ]; then
+		media_targets='mkiso'
+		MEDIA=$ISOFILE
+		log '  NOTE: the desktop is built as an ISO; it must stay under 2 GiB, the DragonFly 6.4 EFI loader cannot read past 2 GiB of ISO9660 -- use DFLY_MEDIA=img for the disk image, as upstream ships its GUI release'
+	elif [ "$p" = desktop ]; then
+		media_targets='mkimg'
+		MEDIA=$IMGFILE
+	else
+		media_targets='mkiso mkimg'
+		MEDIA=$IMGFILE
+	fi
 
-	# The rootskels of the release tooling and the overlay of the
-	# product, in that order: a ROOTSKELS on the command line replaces
-	# every default of the Makefile of the release tooling, so the
-	# build has to name the skeleton of the release tooling itself.
-	GUISK=''
-	[ "$p" = desktop ] && GUISK=" $NRELEASE/gui"
-	ROOTSKELS="$NRELEASE/root$GUISK $SK"
+	# The rootskels of the release tooling and the overlay of the product,
+	# in that order: a ROOTSKELS on the command line replaces every
+	# default of the Makefile of the release tooling, so the build has to
+	# name the skeleton of the release tooling itself. The skeleton of the
+	# GUI of nrelease (nrelease/gui) is NOT among them: it installs into
+	# /usr/pkg paths that the DPorts product does not have (its fstab
+	# mounts /usr/pkg/etc, its xorg.conf points at /usr/pkg, its
+	# /etc/issue says "login as root"), so it drops the live system to
+	# single user; whatever the overlay needs, it carries itself.
+	ROOTSKELS="$NRELEASE/root $SK"
 
 	# the packages of the base list and of the profile list: they are
 	# handed to the release tooling, which puts them into the release
 	# root (DPORTS_EXTRA_PACKAGES). Every one of them is a DPorts
-	# ORIGIN (category/port): dsynth takes origins only, and a bare
-	# name is only understood under the binpkgs modifier.
+	# ORIGIN (category/port): with binpkgs nrelease installs it with
+	# pkg (by name, then by origin), without it nrelease runs make
+	# install for the origin in a chroot, so a bare name is refused.
 	pkgs=$(pkg_list "$ROOT/overlay/base/packages.list" "$ROOT/overlay/profiles/$p/packages.list")
 	for _origin in $pkgs; do
 		chk '^[a-z0-9-]+/[A-Za-z0-9._+-]+$' "$_origin" \
-			"the package list of the $p profile holds a name that is not a DPorts origin (category/port): dsynth takes origins only"
+			"the package list of the $p profile holds a name that is not a DPorts origin (category/port): without binpkgs nrelease builds every package with make install from its DPorts origin"
 	done
 
 	# 1. the overlay, staged for the rootskels hook
@@ -642,8 +687,32 @@ for p in $profiles; do
 	if [ -n "$FBUSER" ]; then
 		step sh -c '
 			set -eu
-			conf=$1; user=$2; keyfile=$3; hash=$4
-			mkdir -p "$(dirname "$conf")"
+			conf=$1; user=$2; keyfile=$3; passfile=$4
+			# the directory is /boot of the image: 0755, whatever the
+			# umask, and created before the umask below
+			mkdir -p -m 755 "$(dirname "$conf")"
+			# the file may hold a password hash: it is created 0600,
+			# never readable by others, even before the chmod below
+			umask 077
+			pass=
+			if [ -n "$passfile" ]; then
+				# -P was given: the hash is required. A file that is
+				# gone, not a regular file, unreadable, empty or not a
+				# crypt(3) hash stops the build (the hash is never
+				# printed)
+				if [ ! -f "$passfile" ] || [ ! -r "$passfile" ]; then
+					printf "build.sh: the password hash file is gone or unreadable: %s; give -P a readable file whose first line is one crypt(3) hash (\$6\$, \$5\$ or \$2b\$; see -P in README.md), and keep it in place until the build is done\n" "$passfile" >&2
+					exit 1
+				fi
+				pass=$(sed -e "s/[[:space:]][[:space:]]*$//" "$passfile" | grep -v "^[[:space:]]*$" | head -1) || pass=
+				case $pass in
+				"\$6\$"* | "\$5\$"* | "\$2b\$"* | "\$2y\$"*) ;;
+				*)
+					printf "build.sh: the password hash file holds no crypt(3) hash: %s; give -P a file whose first line is one crypt(3) hash (\$6\$, \$5\$ or \$2b\$; see -P in README.md), never a plain text password, and keep it unchanged until the build is done\n" "$passfile" >&2
+					exit 1
+					;;
+				esac
+			fi
 			{
 				printf "USERNAME=%s\n" "$user"
 				if [ -n "$keyfile" ]; then
@@ -652,12 +721,12 @@ for p in $profiles; do
 						printf "SSH_KEY=%s\n" "$k"
 					done < "$keyfile"
 				fi
-				if [ -n "$hash" ]; then
-					printf "PASSWORD_HASH=%s\n" "$hash"
+				if [ -n "$pass" ]; then
+					printf "PASSWORD_HASH=%s\n" "$pass"
 				fi
 			} > "$conf"
 			chmod 600 "$conf"
-		' sh "$SK/boot/firstboot-user.conf" "$FBUSER" "$FBKEY" "$FBHASH"
+		' sh "$SK/boot/firstboot-user.conf" "$FBUSER" "$FBKEY" "$FBPASS"
 	fi
 
 	# 2. the release: the world (once for the whole build), the release
@@ -678,6 +747,7 @@ for p in $profiles; do
 		"ISOFILE=$ISOFILE" \
 		"IMGFILE=$IMGFILE" \
 		"DPORTS_PATH=$DPORTS_PATH" \
+		$BINPKGS_ARG \
 		"DPORTS_EXTRA_PACKAGES=$pkgs"
 	first=0
 
@@ -702,15 +772,51 @@ for p in $profiles; do
 	step pwd_mkdb -p -d "$ISOROOT/etc" "$ISOROOT/etc/master.passwd"
 	step pwd_mkdb -p -d "$ISOROOT/etc.hdd" "$ISOROOT/etc.hdd/master.passwd"
 
-	# 4. the media, built from the release root that was fixed
+	# 4. the media, built from the release root that was fixed. The
+	#    size of the image is handed to nrelease as IMGSIZE_MB: the
+	#    apparent size of the staged release root (the sum of the sizes
+	#    of its files, stat -f %z; du reports the blocks on disk, which
+	#    a compressed filesystem such as HAMMER2 makes smaller) plus 25%
+	#    and 512 MiB of slack, so that mkimg does not fail with "No
+	#    space left on device" (and leave the mount wedged). The size is
+	#    only known after the release root has been staged, so it is
+	#    computed once, in the real path: the dry run echoes the command
+	#    without it.
+	if [ "$DRY" -ne 1 ]; then
+		[ -d "$ISOROOT" ] || die "the release root is not staged: $ISOROOT"
+		# each stage is checked on its own (POSIX sh has no pipefail):
+		# a find that fails, a release root without files, a stat that
+		# fails or a size that is not a number stops the build, instead
+		# of handing a size that is too small to nrelease
+		_lst="$PSUB/.release-root-files"
+		_szs="$PSUB/.release-root-sizes"
+		find "$ISOROOT" -type f -print0 > "$_lst" ||
+			die "could not list the files of the release root: $ISOROOT"
+		[ -s "$_lst" ] || die "the release root holds no files: $ISOROOT"
+		xargs -0 stat -f %z < "$_lst" > "$_szs" ||
+			die "could not read the file sizes of the release root: $ISOROOT"
+		_kb=$(awk '$0 !~ /^[0-9]+$/ { bad = 1 } { s += $1; n++ }
+			END { if (bad || n == 0) exit 1; print int(s / 1024) }' "$_szs") ||
+			die "could not sum the file sizes of the release root: $ISOROOT"
+		rm -f "$_lst" "$_szs"
+		IMGSIZE_MB=$((_kb / 1024 * 125 / 100 + 512))
+		# handed to nrelease over the environment: it is not on the
+		# command line, so the plan of the dry run and the commands of
+		# the real path stay the same line, and the size still reaches
+		# the release tooling that writes the image.
+		export IMGSIZE_MB
+	else
+		IMGSIZE_MB=
+	fi
 	log '  [4] the media, built from the release root'
-	step make -C "$NRELEASE" mkiso mkimg \
+	step make -C "$NRELEASE" $media_targets \
 		"ROOTSKELS=$ROOTSKELS" \
 		"ISODIR=$PSUB" \
 		"ISOROOT=$ISOROOT" \
 		"ISOFILE=$ISOFILE" \
 		"IMGFILE=$IMGFILE" \
 		"DPORTS_PATH=$DPORTS_PATH" \
+		$BINPKGS_ARG \
 		"DPORTS_EXTRA_PACKAGES=$pkgs"
 
 	# 5. the checks on the release root: no uid-0 account with a

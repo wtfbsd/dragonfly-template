@@ -306,11 +306,21 @@ realbuild() { # realbuild <workdir> [more build.sh arguments] — run the real
 	# build; sets $realrc/$realout. The profile comes from $REAL_PROFILE
 	# (default: appliance) and every path is absolute, so that the plan
 	# of the dry run and the commands of the real run can be compared.
+	# $REAL_SRC_EXTRA, when set, is a directory copied over the fake
+	# source tree (a file added to the skeleton of the release root);
+	# $REAL_XTRACE=1 runs build.sh under sh -x, so that the transcript
+	# shows the argv of every command of the real path;
+	# $REAL_PATH_PREFIX, when set, is put before the stand-ins on PATH.
 	_rb_w=$1
 	shift
 	rm -rf "$_rb_w/src" "$_rb_w/out" "$_rb_w/release" "$_rb_w/dports"
 	mkdir -p "$_rb_w/src" "$_rb_w/release" "$_rb_w/dports"
 	cp -R "$repo/tests/fixtures/fake-src/." "$_rb_w/src/"
+	if [ -n "${REAL_SRC_EXTRA:-}" ]; then
+		cp -R "$REAL_SRC_EXTRA/." "$_rb_w/src/"
+	fi
+	_rb_x=+x
+	[ "${REAL_XTRACE:-0}" = 1 ] && _rb_x=-x
 	: > "$_rb_w/stub.log"
 	_rb_args="$*"
 	case " $_rb_args " in
@@ -320,12 +330,12 @@ realbuild() { # realbuild <workdir> [more build.sh arguments] — run the real
 	# shellcheck disable=SC2086
 	(
 		cd "$_rb_w" || exit 1
-		PATH="$repo/tests/stubs:$PATH" \
+		PATH="${REAL_PATH_PREFIX:+$REAL_PATH_PREFIX:}$repo/tests/stubs:$PATH" \
 		STUB_LOG="$_rb_w/stub.log" \
 		WTFBSD_TEST_ALLOW_ANY_OS=1 \
 		WTFBSD_TEST_ALLOW_NONROOT=1 \
 		DPORTS_PATH="$_rb_w/dports" \
-			sh "$build" -c "${REAL_CONF:-$fixture}" -s "$_rb_w/src" -o "$_rb_w/out" \
+			sh "$_rb_x" "$build" -c "${REAL_CONF:-$fixture}" -s "$_rb_w/src" -o "$_rb_w/out" \
 			-p "${REAL_PROFILE:-appliance}" $_rb_args
 	) > "$_rb_w/build.log" 2>&1
 	realrc=$?
@@ -1165,29 +1175,29 @@ fi
 printf '%s\n' '$6$wtfsbsd$0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuv' \
 	> "$work/pass.hash"
 REAL_PROFILE=desktop realbuild "$work/desk" -u ciuser -P "$work/pass.hash"
-# the gui modifier of the release tooling adds a browser and an editor to
-# the packages of the release: the build does not use it. The skeleton of
-# the GUI is named in ROOTSKELS instead.
+# the desktop does not use the release tooling's GUI skeleton (its
+# nrelease/gui skeleton mounts /usr/pkg paths that the product does not
+# have, which drops the live system to single user): whatever the overlay
+# needs it carries itself, so ROOTSKELS is the release root skeleton and
+# the overlay only. The desktop ships a disk image by default, because the
+# DragonFly 6.4 EFI loader cannot read past 2 GiB of an ISO9660 image.
 if [ "$realrc" -eq 0 ] &&
-	! grep -q '^TARGET gui$' "$work/desk/stub.log" 2>/dev/null &&
-	! grep -q '^MODIFIER gui$' "$work/desk/stub.log" 2>/dev/null &&
-	grep -q '^VAR ROOTSKELS=.*/nrelease/gui ' "$work/desk/stub.log" 2>/dev/null &&
-	[ -f "$work/desk/out/desktop/examplebsd-desktop-amd64.iso" ]; then
-	ok "(C1) the desktop profile is built without the gui modifier of nrelease"
+	! grep -q '^VAR ROOTSKELS=.*/nrelease/gui ' "$work/desk/stub.log" 2>/dev/null &&
+	[ -f "$work/desk/out/desktop/examplebsd-desktop-amd64.img" ]; then
+	ok "(C1) the desktop is built without the release tooling's GUI skeleton and ships a disk image"
 else
-	no "(C1) the desktop profile is built without the gui modifier of nrelease (rc=$realrc)"
-	sed 's/^/      | /' "$work/desk/build.log"
+	no "(C1) the desktop is built without the release tooling's GUI skeleton and ships a disk image (rc=$realrc)"
+	grep '^VAR ROOTSKELS=' "$work/desk/stub.log" 2>/dev/null | sed 's/^/      | /'
 fi
 REAL_PROFILE=both realbuild "$work/both" -u ciuser -k "$work/ci.pub" -P "$work/pass.hash"
 if [ "$realrc" -eq 0 ] &&
-	! grep -q '^TARGET gui$' "$work/both/stub.log" 2>/dev/null &&
-	! grep -q '^MODIFIER gui$' "$work/both/stub.log" 2>/dev/null &&
+	! grep -q '^VAR ROOTSKELS=.*/nrelease/gui ' "$work/both/stub.log" 2>/dev/null &&
 	[ -f "$work/both/out/appliance/examplebsd-appliance-amd64.img" ] &&
-	[ -f "$work/both/out/desktop/examplebsd-desktop-amd64.iso" ]; then
-	ok "(C1) the profile both is built through the real path"
+	[ -f "$work/both/out/desktop/examplebsd-desktop-amd64.img" ]; then
+	ok "(C1) the profile both ships the appliance image and the desktop disk image through the real path"
 else
-	no "(C1) the profile both is built through the real path (rc=$realrc)"
-	sed 's/^/      | /' "$work/both/build.log"
+	no "(C1) the profile both ships the appliance image and the desktop disk image through the real path (rc=$realrc)"
+	grep '^VAR ROOTSKELS=' "$work/both/stub.log" 2>/dev/null | sed 's/^/      | /'
 fi
 
 # --------------------------------------------------------------------------
@@ -1277,8 +1287,8 @@ sed -e 's#/etc/rc\.subr#@R@/etc/rc.subr#g' \
 chmod 755 "$work/fbroot/etc/rc.d/firstboot_user"
 printf 'ciuser:x:1001:1001:Ci User:%s/home/ciuser:/bin/sh\n' "$work/fbroot" \
 	> "$work/fbroot/etc/passwd"
-printf 'USERNAME=ciuser\nSSH_KEY=%s %s testkey\n' 'ssh-ed25519' 'AAAAtest' \
-	> "$work/fbroot/boot/firstboot-user.conf"
+printf 'USERNAME=ciuser\nFULLNAME=Ada Lovelace\nSSH_KEY=%s %s testkey\n' \
+	'ssh-ed25519' 'AAAAtest' > "$work/fbroot/boot/firstboot-user.conf"
 printf 'permit persist :wheel\n' > "$work/fbroot/usr/local/etc/doas.conf"
 : > "$work/pw.log"
 PATH="$work/fakebin:$PATH" PW_LOG="$work/pw.log" LOGGER_LOG="$work/logger.log" \
@@ -1359,10 +1369,13 @@ if [ $? -ne 0 ]; then
 else
 	no "(C3) the appliance profile asks for a key"
 fi
-if [ -f "$stage/firstboot" ]; then
-	ok "(C3) the image holds the sentinel of the first boot"
+# the release root also becomes the read-only ISO, where the stock
+# /etc/rc cannot remove /firstboot: the tree carries no sentinel (mkimg
+# creates it in the disk image, see D7)
+if [ ! -e "$stage/firstboot" ]; then
+	ok "(C3) the release root holds no sentinel of the first boot (it becomes the read-only ISO)"
 else
-	no "(C3) the image holds the sentinel of the first boot"
+	no "(C3) the release root holds no sentinel of the first boot (it becomes the read-only ISO)"
 fi
 
 # --------------------------------------------------------------------------
@@ -1756,8 +1769,9 @@ done
 
 # --------------------------------------------------------------------------
 # (D1) the skeleton of the release tooling is kept: the rootskels of the
-#      build hold the skeleton of the release root, the skeleton of the
-#      GUI (the desktop) and the overlay of the product, in that order
+#      build hold the skeleton of the release root and the overlay of the
+#      product, in that order. The GUI skeleton of nrelease is NOT among
+#      them (the overlay carries whatever it needs).
 # --------------------------------------------------------------------------
 d1log="$work/c1/stub.log"
 if grep -q '^VAR ROOTSKELS=.*/nrelease/root .*/rootskels$' "$d1log" 2>/dev/null; then
@@ -1767,10 +1781,10 @@ else
 	grep '^VAR ROOTSKELS=' "$d1log" 2>/dev/null | sed 's/^/      | /'
 fi
 if grep -q '^VAR ROOTSKELS=.*/nrelease/gui .*/rootskels$' "$work/desk/stub.log" 2>/dev/null; then
-	ok "(D1) the desktop hands the skeleton of the GUI to make(1) as well"
-else
-	no "(D1) the desktop hands the skeleton of the GUI to make(1) as well"
+	no "(D1) the desktop does NOT hand the release tooling's GUI skeleton to make(1)"
 	grep '^VAR ROOTSKELS=' "$work/desk/stub.log" 2>/dev/null | sed 's/^/      | /'
+else
+	ok "(D1) the desktop does NOT hand the release tooling's GUI skeleton to make(1)"
 fi
 if [ -f "$stage/boot/loader.conf" ] &&
 	grep -q '^kernel_options="-C"' "$stage/boot/loader.conf" 2>/dev/null &&
@@ -1849,7 +1863,7 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# (D2) the packages are DPorts origins: dsynth takes category/port only
+# (D2) the packages are DPorts origins: pkg_add takes category/port only
 # --------------------------------------------------------------------------
 d2bad=''
 for d2list in "$repo/overlay/base/packages.list" \
@@ -1873,7 +1887,7 @@ else
 	no "(D2) the origins of the base list reach the release tooling"
 	grep '^VAR DPORTS_EXTRA_PACKAGES=' "$d1log" 2>/dev/null | sed 's/^/      | /'
 fi
-# a list with a bare name is refused: dsynth would not take it
+# a list with a bare name is refused: pkg_add would not take it
 rm -rf "$work/badrepo"
 mkdir -p "$work/badrepo"
 ( cd "$repo" && tar -cf - --exclude=.git . ) | ( cd "$work/badrepo" && tar -xf - )
@@ -2318,6 +2332,547 @@ if [ -z "$c9bad" ]; then
 	ok "(C13) the desktop ships every X driver of DPorts and the GPU userland"
 else
 	no "(C13) the desktop ships every X driver of DPorts and the GPU userland:$c9bad"
+fi
+
+# --------------------------------------------------------------------------
+# the eight defects the first real 6.4.2 build found: one red/green test
+# each, proving the behaviour that the fix introduced (each would be red
+# without the fix)
+# --------------------------------------------------------------------------
+
+PASS='$6$wtfsbsd$0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuv'
+
+# (1) media vs ISO: the desktop ships a disk image by default (the 6.4 EFI
+#      loader cannot read past 2 GiB of an ISO), not an ISO
+REAL_PROFILE=desktop realbuild "$work/f6" -u ciuser -P "$work/pass.hash"
+if [ "$realrc" -eq 0 ] &&
+	[ -f "$realout/desktop/examplebsd-desktop-amd64.img" ] &&
+	! [ -f "$realout/desktop/examplebsd-desktop-amd64.iso" ]; then
+	ok "(F6) the desktop ships a disk image by default, no ISO"
+else
+	no "(F6) the desktop ships a disk image by default, no ISO (rc=$realrc)"
+	sed 's/^/      | /' "$work/f6/build.log" 2>/dev/null
+fi
+
+# (3) IMGSIZE_MB: the size is the APPARENT size of the staged root (the
+#      sum of the sizes of its files) plus 25% and 512 MiB, handed to
+#      nrelease over the environment, so the image carries it; the dry
+#      run echoes the command without the size. The release root gets a
+#      sparse file of 3 MiB and du(1) reports a compressed size (a
+#      HAMMER2 build host): a stand-in du prints 8 KiB for every path, in
+#      the format of du(1) ("<KiB><TAB><path>"), so a size taken from du
+#      is not the apparent size and the test tells them apart.
+mkdir -p "$work/f1extra/nrelease/root/usr/share/f1" "$work/f1du"
+dd if=/dev/zero of="$work/f1extra/nrelease/root/usr/share/f1/sparse.bin" \
+	bs=1024 count=1 seek=3071 2>/dev/null
+cat > "$work/f1du/du" <<'FAKEDU'
+#!/bin/sh
+# a du(1) of a compressed filesystem: every path takes 8 KiB on disk
+for _a in "$@"; do
+	case $_a in
+	-*) ;;
+	*) printf '8\t%s\n' "$_a" ;;
+	esac
+done
+exit 0
+FAKEDU
+chmod 755 "$work/f1du/du"
+f1path=$PATH
+PATH="$work/f1du:$PATH"
+REAL_SRC_EXTRA="$work/f1extra" realbuild "$work/f1" -u ciuser -k "$work/ci.pub"
+PATH=$f1path
+f1got=$(sed -n 's/^image-size: //p' "$realout/appliance/examplebsd-appliance-amd64.img" 2>/dev/null | head -1)
+f1kb=$(find "$realout/appliance/root" -type f | while IFS= read -r _f; do wc -c < "$_f"; done |
+	awk '{ s += $1 } END { print int(s / 1024) }')
+f1want=$((f1kb / 1024 * 125 / 100 + 512))
+if [ "$realrc" -eq 0 ] && [ -n "$f1got" ] && [ "$f1got" = "$f1want" ] && [ "$f1want" -gt 512 ]; then
+	ok "(F1) the real build hands the apparent size of the release root (+25% +512 MiB) to nrelease as IMGSIZE_MB ($f1got MiB)"
+else
+	no "(F1) the real build hands the apparent size of the release root (+25% +512 MiB) to nrelease as IMGSIZE_MB (rc=$realrc, got ${f1got:-none}, want $f1want)"
+	sed 's/^/      | /' "$work/f1/build.log" 2>/dev/null | tail -20
+fi
+# the code lines of build.sh (the comments left out)
+f1code=$(grep -v '^[[:space:]]*#' "$build")
+if [ "$(printf '%s\n' "$f1code" | grep -c 'stat -f %z')" -eq 1 ] &&
+	! printf '%s\n' "$f1code" | grep -qE '(^|[^a-z])du[[:space:]]'; then
+	ok "(F1) the apparent size is computed once, with stat -f %z (no du)"
+else
+	no "(F1) the apparent size is computed once, with stat -f %z (no du)"
+	grep -n 'stat -f\|du -' "$build" | sed 's/^/      | /'
+fi
+sh "$build" -n -c "$fixture" -s "$work/f1/src" -o "$work/f1/dry" -p appliance --no-user > "$work/f1/dry.log" 2>&1
+if ! grep -q 'IMGSIZE_MB' "$work/f1/dry.log"; then
+	ok "(F1) the dry run echoes the command without the image size"
+else
+	no "(F1) the dry run echoes the command without the image size"
+	sed 's/^/      | /' "$work/f1/dry.log" 2>/dev/null
+fi
+
+# (5) password-hash leak: the hash is baked into the image, but it is read
+#      from the file inside the command that writes the configuration, so
+#      it never reaches the transcript, nor the argv of step() on the
+#      real path: the real build runs under sh -x, which prints the argv
+#      of every command (an argv that holds the script of sh -c spans
+#      several lines of the trace). The hash may appear in the trace only
+#      where build.sh validates the file (the assignment of FBHASH and
+#      its test [ -n ... ]); any other line that holds it is a leak.
+REAL_XTRACE=1 realbuild "$work/f5x" -u ciuser -k "$work/ci.pub" -P "$work/pass.hash"
+f5x=$(grep -F "$PASS" "$work/f5x/build.log" 2>/dev/null |
+	grep -vE "^[+]+ (FBHASH=|'?\\['? -n )" | grep -c . || true)
+if [ "$realrc" -eq 0 ] && [ "$f5x" -eq 0 ] &&
+	grep -qF "PASSWORD_HASH=$PASS" "$work/f5x/out/appliance/root/boot/firstboot-user.conf" 2>/dev/null; then
+	ok "(F5) on the real path the password hash is never on the argv of step()"
+else
+	no "(F5) on the real path the password hash is never on the argv of step() (rc=$realrc, $f5x traced lines carry it)"
+	grep -F "$PASS" "$work/f5x/build.log" 2>/dev/null | grep -vE "^[+]+ (FBHASH=|'?\\['? -n )" |
+		cut -c1-160 | sed 's/^/      | /'
+fi
+# the configuration may hold a hash: it is mode 0600 in the staged tree
+f5mode=$(ls -l "$work/f5x/out/appliance/rootskels/boot/firstboot-user.conf" 2>/dev/null | cut -c1-10)
+f5rmode=$(ls -l "$work/f5x/out/appliance/root/boot/firstboot-user.conf" 2>/dev/null | cut -c1-10)
+if [ "$f5mode" = '-rw-------' ] && [ "$f5rmode" = '-rw-------' ]; then
+	ok "(F5) /boot/firstboot-user.conf is mode 0600 in the staged tree and in the release root"
+else
+	no "(F5) /boot/firstboot-user.conf is mode 0600 in the staged tree and in the release root (got ${f5mode:-none} / ${f5rmode:-none})"
+fi
+# the directory of the configuration is /boot of the image: 0755, never
+# the 0700 of the umask that protects the configuration
+f5b=$(ls -ld "$work/f5x/out/appliance/rootskels/boot" 2>/dev/null | cut -c1-10)
+if [ "$f5b" = 'drwxr-xr-x' ]; then
+	ok "(F5) the staged /boot that holds the configuration is mode 0755"
+else
+	no "(F5) the staged /boot that holds the configuration is mode 0755 (got ${f5b:-none})"
+fi
+# ... and it is 0600 from its creation: a chmod(1) put before the
+# stand-ins records the mode of the configuration BEFORE build.sh
+# changes it, then hands the call to the stand-in
+mkdir -p "$work/f5u/bin"
+cat > "$work/f5u/bin/chmod" <<FAKECHMOD
+#!/bin/sh
+for _a in "\$@"; do
+	case \$_a in
+	*/boot/firstboot-user.conf) ls -l "\$_a" | cut -c1-10 >> "$work/f5u/modes" ;;
+	esac
+done
+exec "$repo/tests/stubs/chmod" "\$@"
+FAKECHMOD
+chmod 755 "$work/f5u/bin/chmod"
+: > "$work/f5u/modes"
+REAL_PATH_PREFIX="$work/f5u/bin" realbuild "$work/f5u" -u ciuser -k "$work/ci.pub" -P "$work/pass.hash"
+f5u=$(sort -u "$work/f5u/modes")
+if [ "$realrc" -eq 0 ] && [ "$f5u" = '-rw-------' ]; then
+	ok "(F5) /boot/firstboot-user.conf is created 0600 (before its chmod), never readable by others"
+else
+	no "(F5) /boot/firstboot-user.conf is created 0600 (before its chmod), never readable by others (rc=$realrc, modes: ${f5u:-none})"
+fi
+realbuild "$work/f2" -u ciuser -k "$work/ci.pub" -P "$work/pass.hash"
+if [ "$realrc" -eq 0 ] &&
+	! grep -qF "$PASS" "$work/f2/build.log" 2>/dev/null &&
+	! grep -qF "$PASS" "$work/f2/stub.log" 2>/dev/null; then
+	ok "(F5) the password hash is baked into the image but never reaches the build transcript"
+else
+	no "(F5) the password hash is baked into the image but never reaches the build transcript (rc=$realrc)"
+	sed 's/^/      | /' "$work/f2/build.log" 2>/dev/null
+fi
+if [ -f "$work/f2/out/appliance/root/boot/firstboot-user.conf" ] &&
+	grep -qF "PASSWORD_HASH=$PASS" "$work/f2/out/appliance/root/boot/firstboot-user.conf"; then
+	ok "(F5) the password hash is baked into the first-boot configuration"
+else
+	no "(F5) the password hash is baked into the first-boot configuration"
+fi
+sh "$build" -n -c "$fixture" -s "$work/f2/src" -o "$work/f2/dry" -p appliance -u ciuser -k "$work/ci.pub" -P "$work/pass.hash" > "$work/f2/dry.log" 2>&1
+if ! grep -qF "$PASS" "$work/f2/dry.log"; then
+	ok "(F5) the dry run echoes the first-boot configuration with the password file path, not the hash"
+else
+	no "(F5) the dry run echoes the first-boot configuration with the password file path, not the hash"
+	sed 's/^/      | /' "$work/f2/dry.log" 2>/dev/null
+fi
+
+# (5) -P was given: the hash file is read again when the configuration
+#      is written. A file that is emptied or removed after the options
+#      were checked stops the build; it never writes a configuration
+#      without the hash. A chmod(1) before the stand-ins changes the file
+#      at its first call (the modes of the overlay, before the write).
+for f5case in empty gone; do
+	mkdir -p "$work/f5p-$f5case/bin"
+	cp "$work/pass.hash" "$work/f5p-$f5case/pass.hash"
+	cat > "$work/f5p-$f5case/bin/chmod" <<FAKECHMOD
+#!/bin/sh
+if [ ! -e "$work/f5p-$f5case/done" ]; then
+	: > "$work/f5p-$f5case/done"
+	case $f5case in
+	empty) : > "$work/f5p-$f5case/pass.hash" ;;
+	gone) rm -f "$work/f5p-$f5case/pass.hash" ;;
+	esac
+fi
+exec "$repo/tests/stubs/chmod" "\$@"
+FAKECHMOD
+	chmod 755 "$work/f5p-$f5case/bin/chmod"
+	rm -f "$work/f5p-$f5case/done"
+	REAL_PATH_PREFIX="$work/f5p-$f5case/bin" realbuild "$work/f5p-$f5case" \
+		-u ciuser -k "$work/ci.pub" -P "$work/f5p-$f5case/pass.hash"
+	f5pc="$work/f5p-$f5case/out/appliance/rootskels/boot/firstboot-user.conf"
+	if [ "$realrc" -ne 0 ] && ! grep -q '^USERNAME=' "$f5pc" 2>/dev/null &&
+		grep -q 'password hash file' "$work/f5p-$f5case/build.log" &&
+		grep -q 'give -P a .*file whose first line is one crypt(3) hash' "$work/f5p-$f5case/build.log" &&
+		! grep -qF "$PASS" "$work/f5p-$f5case/build.log"; then
+		ok "(F5) a -P hash file that is $f5case when the configuration is written stops the build and says what to give -P"
+	else
+		no "(F5) a -P hash file that is $f5case when the configuration is written stops the build and says what to give -P (rc=$realrc)"
+		tail -5 "$work/f5p-$f5case/build.log" | sed 's/^/      | /'
+	fi
+done
+
+# (3) the sum of the sizes fails closed: a find that fails, a release root
+#      without files, a stat that fails or a size that is not a number
+#      stops the build instead of handing a too small IMGSIZE_MB to
+#      nrelease. The broken tool is put before the stand-ins on PATH.
+f11() { # f11 <dir> <tool> <body> <expected message> — the case is <dir>
+	mkdir -p "$work/f11-$1/bin"
+	printf '#!/bin/sh\n%s\n' "$3" > "$work/f11-$1/bin/$2"
+	chmod 755 "$work/f11-$1/bin/$2"
+	REAL_PATH_PREFIX="$work/f11-$1/bin" realbuild "$work/f11-$1" -u ciuser -k "$work/ci.pub"
+	if [ "$realrc" -ne 0 ] && grep -q "$4" "$work/f11-$1/build.log" &&
+		! grep -q '^CMD make .*mkimg' "$work/f11-$1/stub.log"; then
+		ok "(F11) the image size fails closed: $1"
+	else
+		no "(F11) the image size fails closed: $1 (rc=$realrc)"
+		tail -5 "$work/f11-$1/build.log" | sed 's/^/      | /'
+	fi
+}
+f11 find-fails find 'case " $* " in *" -print0 "*) command -p find "$@"; exit 1 ;; esac; command -p find "$@"' \
+	'could not list the files of the release root'
+f11 no-files find 'case " $* " in *" -print0 "*) exit 0 ;; esac; command -p find "$@"' \
+	'the release root holds no files'
+f11 stat-fails stat 'echo "stat: $1: Permission denied" >&2; exit 1' \
+	'could not read the file sizes of the release root'
+f11 size-not-a-number stat 'for _f; do echo x; done; exit 0' \
+	'could not sum the file sizes of the release root'
+
+# the stand-in for make(1) keeps every modifier of the command line
+mkdir -p "$work/mods/dports"
+: > "$work/mods/stub.log"
+STUB_LOG="$work/mods/stub.log" DPORTS_PATH="$work/mods/dports" \
+	sh "$repo/tests/stubs/make" -C "$repo/tests/fixtures/fake-src/nrelease" gui binpkgs check \
+	> "$work/mods/out.log" 2>&1
+if grep -q '^MODIFIER gui$' "$work/mods/stub.log" && grep -q '^MODIFIER binpkgs$' "$work/mods/stub.log"; then
+	ok "(F3) the stand-in for make(1) logs every modifier (gui and binpkgs)"
+else
+	no "(F3) the stand-in for make(1) logs every modifier (gui and binpkgs)"
+	sed 's/^/      | /' "$work/mods/stub.log" "$work/mods/out.log"
+fi
+
+# (6) BINPKGS=yes|no: yes hands the binpkgs modifier to nrelease, no does
+#      not, and the image is shipped either way
+BINPKGS=yes REAL_PROFILE=appliance realbuild "$work/f3y" -u ciuser -k "$work/ci.pub"
+if [ "$realrc" -eq 0 ] && grep -q '^MODIFIER binpkgs' "$work/f3y/stub.log" 2>/dev/null; then
+	ok "(F3) the real build hands the binpkgs modifier to nrelease when BINPKGS=yes"
+else
+	no "(F3) the real build hands the binpkgs modifier to nrelease when BINPKGS=yes (rc=$realrc)"
+	sed 's/^/      | /' "$work/f3y/stub.log" 2>/dev/null
+fi
+# the modifier reaches BOTH make calls that take the packages (the
+# release, and the media built after the post-customize step)
+f3calls=$(grep -c '^CMD make .*DPORTS_EXTRA_PACKAGES=' "$work/f3y/stub.log" 2>/dev/null || true)
+f3bin=$(grep '^CMD make .*DPORTS_EXTRA_PACKAGES=' "$work/f3y/stub.log" 2>/dev/null | grep -c ' binpkgs ' || true)
+if [ "$f3calls" -eq 2 ] && [ "$f3bin" -eq 2 ]; then
+	ok "(F3) BINPKGS=yes hands binpkgs to both make calls (the release and the media)"
+else
+	no "(F3) BINPKGS=yes hands binpkgs to both make calls (the release and the media) ($f3bin of $f3calls)"
+	grep '^CMD make' "$work/f3y/stub.log" 2>/dev/null | cut -c1-160 | sed 's/^/      | /'
+fi
+BINPKGS=no REAL_PROFILE=appliance realbuild "$work/f3n" -u ciuser -k "$work/ci.pub"
+if [ "$realrc" -eq 0 ] && ! grep -q '^MODIFIER binpkgs' "$work/f3n/stub.log" 2>/dev/null &&
+	[ -f "$realout/appliance/examplebsd-appliance-amd64.img" ]; then
+	ok "(F3) the real build hands no binpkgs modifier and still ships the image when BINPKGS=no"
+else
+	no "(F3) the real build hands no binpkgs modifier and still ships the image when BINPKGS=no (rc=$realrc)"
+	sed 's/^/      | /' "$work/f3n/stub.log" 2>/dev/null
+fi
+
+# (7) the first-boot script: the X fallback of the console display. It is
+#      installed only when the display has no DRM device (/dev/dri/card0),
+#      so a real graphics driver is never shadowed; it is installed at the
+#      start of the script, whether or not a first-boot user is
+#      configured and whether or not /home is writable; a file the
+#      administrator put there is kept; an xorg.conf.d that cannot be
+#      written is left alone. The source is the path of the product slug,
+#      substituted as the build does (@SLUG@ -> examplebsd).
+fb="$work/f45"
+rm -rf "$fb"
+mkdir -p "$fb/etc/rc.d" "$fb/boot" "$fb/usr/local/etc" "$fb/home" \
+	"$fb/usr/local/share/examplebsd/xorg" "$fb/usr/local/share/otherbsd/xorg" \
+	"$fb/usr/local/etc/X11/xorg.conf.d" "$fb/fakebin"
+cp "$repo/overlay/profiles/desktop/rootfs/usr/local/share/@SLUG@/xorg/20-scfb.conf" \
+	"$fb/usr/local/share/examplebsd/xorg/20-scfb.conf"
+# a config of another product under /usr/local/share: never installed
+printf 'Section "Device"\n\tIdentifier "other"\nEndSection\n' \
+	> "$fb/usr/local/share/otherbsd/xorg/30-other.conf"
+cat > "$fb/etc/rc.subr" <<'RCSUBR'
+#!/bin/sh
+load_rc_config() { :; }
+run_rc_command() {
+	case ${1:-} in
+	start) "$start_cmd" ;;
+	*) : ;;
+	esac
+}
+RCSUBR
+cat > "$fb/fakebin/pw" <<'FAKEPW'
+#!/bin/sh
+case ${1:-} in
+usershow) exit 1 ;;
+esac
+exit 0
+FAKEPW
+cat > "$fb/fakebin/logger" <<'FAKELOG'
+#!/bin/sh
+exit 0
+FAKELOG
+cat > "$fb/fakebin/chown" <<'FAKECHOWN'
+#!/bin/sh
+exit 0
+FAKECHOWN
+chmod 755 "$fb/etc/rc.subr" "$fb/fakebin/pw" "$fb/fakebin/logger" "$fb/fakebin/chown"
+# the DRM device and every path the script touches are pointed at the
+# sandbox, so that the test controls both states of the gate
+sed -e 's#/etc/rc\.subr#@R@/etc/rc.subr#g' \
+	-e 's#/etc/passwd#@R@/etc/passwd#g' \
+	-e 's#/boot/firstboot-user\.conf#@R@/boot/firstboot-user.conf#g' \
+	-e 's#/usr/local/etc/doas\.conf#@R@/usr/local/etc/doas.conf#g' \
+	-e 's#/usr/local/etc/X11#@R@/usr/local/etc/X11#g' \
+	-e 's#/usr/local/share#@R@/usr/local/share#g' \
+	-e 's#/home#@R@/home#g' \
+	-e 's#/dev/dri/card0#@R@/.card0#g' \
+	-e 's#/firstboot\([^a-z-]\)#@R@/firstboot\1#g' \
+	-e 's#/firstboot$#@R@/firstboot#g' \
+	-e 's#@SLUG@#examplebsd#g' \
+	"$repo/overlay/base/rootfs/etc/rc.d/firstboot_user" |
+	sed "s#@R@#$fb#g" > "$fb/etc/rc.d/firstboot_user"
+chmod 755 "$fb/etc/rc.d/firstboot_user"
+printf 'ciuser:x:1001:1001:Ci User:%s/home/ciuser:/bin/sh\n' "$fb" > "$fb/etc/passwd"
+printf 'permit persist :wheel\n' > "$fb/usr/local/etc/doas.conf"
+fbxdst="$fb/usr/local/etc/X11/xorg.conf.d/20-scfb.conf"
+fbsetup() { # fbsetup <card0 yes|no> <conf yes|no> — run the script once
+	: > "$fb/firstboot"
+	rm -f "$fb/boot/firstboot-user.conf" "$fb/boot/firstboot-user.conf.done" "$fb/.card0"
+	if [ "$2" = yes ]; then
+		printf 'USERNAME=ciuser\nSSH_KEY=%s %s testkey\n' 'ssh-ed25519' 'AAAAtest' > "$fb/boot/firstboot-user.conf"
+	fi
+	if [ "$1" = yes ]; then : > "$fb/.card0"; fi
+	PATH="$fb/fakebin:$PATH" LOGGER_LOG="$fb/logger.log" \
+		sh "$fb/etc/rc.d/firstboot_user" start > "$fb/fb.log" 2>&1
+	fbrc=$?
+}
+# with /dev/dri/card0 present, the fallback is NOT installed
+rm -f "$fbxdst"
+fbsetup yes yes
+if [ ! -e "$fbxdst" ]; then
+	ok "(F7) the X fallback is not installed when /dev/dri/card0 is present (a real driver is not shadowed)"
+else
+	no "(F7) the X fallback is not installed when /dev/dri/card0 is present (a real driver is not shadowed)"
+	sed 's/^/      | /' "$fb/fb.log" 2>/dev/null
+fi
+# without /dev/dri/card0, the fallback IS installed (from the slug path)
+rm -f "$fbxdst"
+fbsetup no yes
+if [ "$fbrc" -eq 0 ] && cmp -s "$fbxdst" "$fb/usr/local/share/examplebsd/xorg/20-scfb.conf" &&
+	[ ! -e "$fb/usr/local/etc/X11/xorg.conf.d/30-other.conf" ]; then
+	ok "(F7) the X fallback of the product slug is installed when /dev/dri/card0 is absent (and nothing else)"
+else
+	no "(F7) the X fallback of the product slug is installed when /dev/dri/card0 is absent (and nothing else) (rc=$fbrc)"
+	sed 's/^/      | /' "$fb/fb.log" 2>/dev/null
+	ls "$fb/usr/local/etc/X11/xorg.conf.d" 2>/dev/null | sed 's/^/      | /'
+fi
+# --no-user: no first-boot configuration, the fallback is installed all
+# the same (it comes before the guard of the configuration)
+rm -f "$fbxdst"
+fbsetup no no
+if [ "$fbrc" -eq 0 ] && [ -f "$fbxdst" ]; then
+	ok "(F7) the X fallback is installed without a first-boot configuration (--no-user)"
+else
+	no "(F7) the X fallback is installed without a first-boot configuration (--no-user) (rc=$fbrc)"
+	sed 's/^/      | /' "$fb/fb.log" 2>/dev/null
+fi
+# a file the administrator put there is kept
+printf '# the file of the administrator\n' > "$fbxdst"
+fbsetup no no
+if grep -q '^# the file of the administrator$' "$fbxdst" 2>/dev/null; then
+	ok "(F7) an X config the administrator put in xorg.conf.d is kept"
+else
+	no "(F7) an X config the administrator put in xorg.conf.d is kept"
+	sed 's/^/      | /' "$fbxdst" 2>/dev/null
+fi
+# a KMS driver appears later: the fallback this script installed (byte-
+# identical to the source) is removed; a file that differs is kept
+rm -f "$fbxdst"
+fbsetup no no
+fbsetup yes no
+if [ "$fbrc" -eq 0 ] && [ ! -e "$fbxdst" ]; then
+	ok "(F7) the installed X fallback is removed once /dev/dri/card0 exists"
+else
+	no "(F7) the installed X fallback is removed once /dev/dri/card0 exists (rc=$fbrc)"
+	sed 's/^/      | /' "$fb/fb.log" 2>/dev/null
+fi
+printf '# the file of the administrator\n' > "$fbxdst"
+fbsetup yes no
+if grep -q '^# the file of the administrator$' "$fbxdst" 2>/dev/null; then
+	ok "(F7) with /dev/dri/card0 an xorg.conf.d file that differs from the fallback is kept"
+else
+	no "(F7) with /dev/dri/card0 an xorg.conf.d file that differs from the fallback is kept"
+fi
+rm -f "$fbxdst"
+if [ "$(id -u)" = 0 ]; then
+	skip "(F7) the read-only cases (the suite runs as root)"
+else
+	# the live media: /home is read-only, the account is not created,
+	# and the fallback is installed all the same
+	rm -f "$fbxdst"
+	chmod 555 "$fb/home"
+	fbsetup no yes
+	if [ "$fbrc" -eq 0 ] && [ -f "$fbxdst" ] && grep -qi 'not writable' "$fb/fb.log"; then
+		ok "(F7) the X fallback is installed when /home is read-only (the live media)"
+	else
+		no "(F7) the X fallback is installed when /home is read-only (the live media) (rc=$fbrc)"
+		sed 's/^/      | /' "$fb/fb.log" 2>/dev/null
+	fi
+	chmod 755 "$fb/home"
+	# an xorg.conf.d that cannot be written is left alone, without error
+	rm -f "$fbxdst"
+	chmod 555 "$fb/usr/local/etc/X11/xorg.conf.d"
+	fbsetup no no
+	if [ "$fbrc" -eq 0 ] && [ ! -e "$fbxdst" ] && ! grep -q 'could not' "$fb/fb.log"; then
+		ok "(F7) a read-only xorg.conf.d is left alone, without an error"
+	else
+		no "(F7) a read-only xorg.conf.d is left alone, without an error (rc=$fbrc)"
+		sed 's/^/      | /' "$fb/fb.log" 2>/dev/null
+	fi
+	chmod 755 "$fb/usr/local/etc/X11/xorg.conf.d"
+fi
+# (8) a completed provisioning moves the configuration out of the way and
+#      removes the sentinel, as before
+fbsetup no yes
+if [ -f "$fb/boot/firstboot-user.conf.done" ] && [ ! -f "$fb/boot/firstboot-user.conf" ] &&
+	[ ! -f "$fb/firstboot" ]; then
+	ok "(F8) a completed provisioning moves the configuration out of the way and removes the sentinel"
+else
+	no "(F8) a completed provisioning moves the configuration out of the way and removes the sentinel"
+	sed 's/^/      | /' "$fb/fb.log" 2>/dev/null
+fi
+# the staged desktop tree: the script names the slug path, substituted,
+# and the fallback ships there
+REAL_PROFILE=desktop realbuild "$work/f7" -u ciuser -P "$work/pass.hash"
+f7stage="$realout/desktop/root"
+if [ "$realrc" -eq 0 ] &&
+	[ -f "$f7stage/usr/local/share/examplebsd/xorg/20-scfb.conf" ] &&
+	grep -q '^	_src=/usr/local/share/examplebsd/xorg/20-scfb.conf$' "$f7stage/etc/rc.d/firstboot_user" 2>/dev/null; then
+	ok "(F7) the staged desktop names the X fallback by the substituted slug path, and ships it there"
+else
+	no "(F7) the staged desktop names the X fallback by the substituted slug path, and ships it there (rc=$realrc)"
+	grep -n '_src=' "$f7stage/etc/rc.d/firstboot_user" 2>/dev/null | sed 's/^/      | /'
+fi
+
+# (4) ifconsole: the getty of the serial console is switched on in both
+#      trees; the ifconsole flag is dropped only from the tty of the
+#      installed system (etc.hdd), the live media keep it
+d4if="$work/d4if"
+rm -rf "$d4if"; mkdir -p "$d4if/etc" "$d4if/etc.hdd" "$d4if/boot" "$d4if/sk"
+printf 'ttyd0\t"/usr/libexec/getty std.9600"\tdialup\toff secure ifconsole\n' > "$d4if/etc/ttys"
+cp "$d4if/etc/ttys" "$d4if/etc.hdd/ttys"
+printf 'root::0:0::0:0::/root:/bin/sh\n' > "$d4if/etc/master.passwd"
+cp "$d4if/etc/master.passwd" "$d4if/etc.hdd/master.passwd"
+printf 'root:x:0:0::/root:/bin/sh\n' > "$d4if/etc/passwd"
+printf '# stock rc.conf\nhostname="localhost"\n' > "$d4if/etc/rc.conf"
+cp "$d4if/etc/rc.conf" "$d4if/etc.hdd/rc.conf"
+printf 'console="comconsole"\n' > "$d4if/boot/loader.conf"
+sh "$repo/tools/post-customize.sh" "$d4if" "$work/norc" "$work/norc" \
+	"$d4if/sk" ttyd0 comconsole - - > "$d4if/log" 2>&1
+d4rc=$?
+if [ "$d4rc" -eq 0 ] && grep -qE '^ttyd0[[:space:]]+"/usr/libexec/getty std.9600"[[:space:]]+dialup[[:space:]]+on[[:space:]]+secure[[:space:]]*$' \
+	"$d4if/etc.hdd/ttys" 2>/dev/null; then
+	ok "(F4) the getty is switched on and the ifconsole flag is dropped from the tty of the installed system (etc.hdd)"
+else
+	no "(F4) the getty is switched on and the ifconsole flag is dropped from the tty of the installed system (etc.hdd) (rc=$d4rc)"
+	sed 's/^/      | /' "$d4if/etc.hdd/ttys" 2>/dev/null
+	sed 's/^/      | /' "$d4if/log" 2>/dev/null
+fi
+if grep -qE '^ttyd0[[:space:]]+"/usr/libexec/getty std.9600"[[:space:]]+dialup[[:space:]]+on[[:space:]]+secure[[:space:]]+ifconsole[[:space:]]*$' \
+	"$d4if/etc/ttys" 2>/dev/null; then
+	ok "(F4) the getty of the live media is switched on and keeps the ifconsole flag"
+else
+	no "(F4) the getty of the live media is switched on and keeps the ifconsole flag"
+	sed 's/^/      | /' "$d4if/etc/ttys" 2>/dev/null
+fi
+
+# (4) GETTY goes into grep patterns and sed scripts: a value that is not a
+#      tty name (ttyd0, ttyv0, ...) is refused before anything changes
+d4bad="$work/d4bad"
+rm -rf "$d4bad"; mkdir -p "$d4bad/root/etc" "$d4bad/root/etc.hdd" "$d4bad/root/boot" "$d4bad/sk"
+printf 'ttyd0\t"/usr/libexec/getty std.9600"\tdialup\toff secure ifconsole\n' > "$d4bad/root/etc/ttys"
+cp "$d4bad/root/etc/ttys" "$d4bad/root/etc.hdd/ttys"
+printf 'root::0:0::0:0::/root:/bin/sh\n' > "$d4bad/root/etc/master.passwd"
+cp "$d4bad/root/etc/master.passwd" "$d4bad/root/etc.hdd/master.passwd"
+printf 'root:x:0:0::/root:/bin/sh\n' > "$d4bad/root/etc/passwd"
+printf 'hostname="localhost"\n' > "$d4bad/root/etc/rc.conf"
+cp "$d4bad/root/etc/rc.conf" "$d4bad/root/etc.hdd/rc.conf"
+printf 'console="comconsole"\n' > "$d4bad/root/boot/loader.conf"
+cp -R "$d4bad/root" "$d4bad/before"
+sh "$repo/tools/post-customize.sh" "$d4bad/root" "$work/norc" "$work/norc" \
+	"$d4bad/sk" "ttyd0\"; touch $d4bad/pwned; \"" comconsole - - > "$d4bad/log" 2>&1
+d4brc=$?
+if [ "$d4brc" -ne 0 ] && grep -q 'GETTY must be a tty name such as ttyd0' "$d4bad/log" &&
+	[ ! -e "$d4bad/pwned" ] && diff -r "$d4bad/before" "$d4bad/root" > /dev/null 2>&1; then
+	ok "(F4) a GETTY that is not a tty name is refused and nothing is changed"
+else
+	no "(F4) a GETTY that is not a tty name is refused and nothing is changed (rc=$d4brc)"
+	sed 's/^/      | /' "$d4bad/log" 2>/dev/null
+	diff -r "$d4bad/before" "$d4bad/root" 2>&1 | sed 's/^/      | /'
+fi
+sh "$repo/tools/post-customize.sh" "$d4bad/root" "$work/norc" "$work/norc" \
+	"$d4bad/sk" ttyv0 comconsole - - > "$d4bad/log2" 2>&1
+if [ $? -eq 0 ]; then
+	ok "(F4) GETTY=ttyv0 (the virtual console of DragonFly) is accepted"
+else
+	no "(F4) GETTY=ttyv0 (the virtual console of DragonFly) is accepted"
+	sed 's/^/      | /' "$d4bad/log2" 2>/dev/null
+fi
+
+# (1) the first-boot sentinel: an ISO build's release root (the tree of
+#      the read-only ISO) holds no /firstboot, so the stock /etc/rc never
+#      tries to remove it there
+DFLY_MEDIA=iso REAL_PROFILE=desktop realbuild "$work/f9" -u ciuser -P "$work/pass.hash"
+if [ "$realrc" -eq 0 ] && [ -f "$realout/desktop/examplebsd-desktop-amd64.iso" ] &&
+	[ -d "$realout/desktop/root/etc" ] && [ ! -e "$realout/desktop/root/firstboot" ]; then
+	ok "(F9) an ISO build's release root holds no /firstboot"
+else
+	no "(F9) an ISO build's release root holds no /firstboot (rc=$realrc)"
+	sed 's/^/      | /' "$work/f9/build.log" 2>/dev/null | tail -20
+fi
+
+# (7) the knob of the media is DFLY_MEDIA: an unrelated MEDIA in the
+#      environment does not stop the build; a bad DFLY_MEDIA does
+MEDIA=/dev/cd0 REAL_PROFILE=desktop realbuild "$work/f10" -u ciuser -P "$work/pass.hash"
+if [ "$realrc" -eq 0 ] && [ -f "$realout/desktop/examplebsd-desktop-amd64.img" ]; then
+	ok "(F10) an unrelated MEDIA in the environment does not stop the build"
+else
+	no "(F10) an unrelated MEDIA in the environment does not stop the build (rc=$realrc)"
+	sed 's/^/      | /' "$work/f10/build.log" 2>/dev/null | tail -20
+fi
+DFLY_MEDIA=dvd sh "$build" -n -c "$fixture" -p desktop --no-user -o "$work/f10/dry" > "$work/f10/bad.log" 2>&1
+f10rc=$?
+if [ "$f10rc" -ne 0 ] && grep -q 'DFLY_MEDIA must be' "$work/f10/bad.log"; then
+	ok "(F10) a DFLY_MEDIA that is neither img nor iso is refused"
+else
+	no "(F10) a DFLY_MEDIA that is neither img nor iso is refused (rc=$f10rc)"
+	sed 's/^/      | /' "$work/f10/bad.log" 2>/dev/null
+fi
+DFLY_MEDIA=iso sh "$build" -n -c "$fixture" -p desktop --no-user -o "$work/f10/dry" > "$work/f10/iso.log" 2>&1
+if grep -q 'NOTE: the desktop is built as an ISO; it must stay under 2 GiB' "$work/f10/iso.log" &&
+	! grep 'NOTE: the desktop is built as an ISO' "$work/f10/iso.log" | LC_ALL=C grep -q '[^ -~]'; then
+	ok "(F10) the 2 GiB note of the desktop ISO is plain ASCII"
+else
+	no "(F10) the 2 GiB note of the desktop ISO is plain ASCII"
+	grep 'NOTE' "$work/f10/iso.log" 2>/dev/null | sed 's/^/      | /'
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

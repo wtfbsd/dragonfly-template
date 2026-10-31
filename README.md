@@ -151,14 +151,18 @@ root:
 DPORTS_EXTRA_PACKAGES="<the packages of the base list and of the profile list>"
 ```
 
-The names are origins and not bare package names: `dsynth` takes origins
-only, and a bare name is only understood under the `binpkgs` modifier of
-the release tooling, which this template does not use. A list that holds
-a bare name is refused by the build.
+The names are DPorts origins (`category/port`), which both ways of the
+release tooling of DragonFly 6.4 accept. With the `binpkgs` modifier (on
+by default, `BINPKGS=yes`) `nrelease` installs binary packages with
+`pkg`, by name and then by origin; without it (`BINPKGS=no`) it runs
+`make install` for every DPorts origin in a chroot, which builds every
+package from source. A list that holds a bare name is refused by the
+build.
 
-The packages are built from the DPorts tree of the build host. Its path
-is `DPORTS_PATH` and its default is `/usr/dports`; the `check` target of
-the release tooling refuses to build without it:
+The DPorts tree of the build host is named on the command line of the
+release tooling (it is where `BINPKGS=no` builds from). Its path is
+`DPORTS_PATH` and its default is `/usr/dports`; the `check` target of the
+release tooling refuses to build without it:
 
 ```
 DPORTS_PATH=/usr/dports ./build.sh -c product.conf
@@ -245,9 +249,9 @@ line by line and never sources it.
 ```
 
 The build needs the DPorts tree of the build host (`DPORTS_PATH`, by
-default `/usr/dports`): the packages of the overlay are built from it,
-and the `check` target of the release tooling refuses to build without
-it.
+default `/usr/dports`): with `BINPKGS=no` the packages of the overlay
+are built from it, and the `check` target of the release tooling refuses
+to build without it.
 
 The dry run validates the configuration, prints the whole plan and
 changes nothing. It works on any POSIX host. The plan is not a second
@@ -270,6 +274,14 @@ and says so. The real build also **runs as root**: it writes into the
 release root, installs packages and changes the owner of the staged
 files.
 
+Environment knobs of the build:
+
+| knob | what it does |
+|------|--------------|
+| `DFLY_MEDIA` | `img` (default) or `iso`: the media of the desktop profile. The DragonFly 6.4 EFI loader cannot read past 2 GiB of an ISO9660 image, so the desktop ships a disk image unless `iso` is asked for (the plan then warns that the ISO must stay under 2 GiB). The appliance always ships a disk image. Any other value is refused. |
+| `BINPKGS` | `yes` (default) or `no`. `yes` hands the `binpkgs` modifier to `nrelease`, which installs binary packages with `pkg`; `no` builds every package from its DPorts origin with `make install` in a chroot (hours). Any other value is refused. |
+| `DPORTS_PATH` | the DPorts tree of the build host (default `/usr/dports`) |
+
 Two environment variables exist for the test suite only; a build host
 must never set them:
 
@@ -286,7 +298,8 @@ documents, so there is no knob for the directories of the run:
 Artifacts:
 
 ```
-out/<profile>/<slug>-<profile>-<arch>.iso    the media (iso or img)
+out/<profile>/<slug>-<profile>-<arch>.img    the media (.img; .iso for a
+                                             desktop with DFLY_MEDIA=iso)
 out/<profile>/ARTIFACT                       the path of the media
 out/SHA256                                    its checksum
 ```
@@ -334,11 +347,15 @@ tooling cannot know about:
   (the overlay owns the variables, the release tooling owns the files);
 - it enables the getty of the serial console (`ttyd0`) — only the status
   field of the line changes, the terminal type stays as the release
-  tooling wrote it — and points the console of the kernel at it
+  tooling wrote it; in the `ttys` of the installed system
+  (`etc.hdd/ttys`) the `ifconsole` flag is dropped as well, because the
+  installer writes a `loader.conf` without the console line, while the
+  live media keep it — and points the console of the kernel at it
   (`console="comconsole"` in `/boot/loader.conf`, the file the loader of
   DragonFly reads; the file of the release tooling is never replaced);
 - it locks every account with uid 0 and removes the `installer` account
-  of the release tooling from the appliance image. On the **desktop ISO**
+  of the release tooling from the appliance image. On the **desktop
+  media** (a disk image by default, an ISO only with `DFLY_MEDIA=iso`)
   the `installer` account keeps its empty password: it is the install
   path, and nobody can install the system without it;
 - it mirrors the `/etc` files of the overlay into `/etc.hdd`: the release
@@ -349,8 +366,10 @@ tooling cannot know about:
   `/var`, `/tmp` and `/root` on a tmpfs) never reaches the installed
   system, and every uid-0 account of the tree of the installer is
   locked;
-- it creates the sentinel of the first boot (`/firstboot`), which only
-  `mkimg` would create.
+- it does not create the sentinel of the first boot (`/firstboot`): the
+  `mkimg` target of the release tooling creates it in the disk image, and
+  the release root also becomes the read-only ISO, where the stock
+  `/etc/rc` could not remove it.
 
 ## CI
 

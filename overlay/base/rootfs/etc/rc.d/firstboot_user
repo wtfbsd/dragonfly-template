@@ -22,11 +22,12 @@
 #   WHEEL=yes|no          default yes
 #
 # The script guards itself: while the configuration file is absent it
-# does nothing at all, so it can run at every boot. Its rc.d keyword is
-# NOT the firstboot keyword: the installer of DragonFly copies only the
-# paths of share/installer/sources.conf, and /firstboot is not among
-# them, so a script that is guarded by that keyword never runs on an
-# installed system. The configuration file is the guard this script
+# provisions nothing (only the X fallback of the console display below
+# is installed or removed, when it applies), so it can run at every
+# boot. Its rc.d keyword is NOT the firstboot keyword: the installer of
+# DragonFly copies only the paths of share/installer/sources.conf, and
+# /firstboot is not among them, so a script that is guarded by that keyword never runs on
+# an installed system. The configuration file is the guard this script
 # relies upon; the sentinel is removed once the provisioning is done.
 #
 # The live media (the ISO) has a read-only home directory: the script
@@ -59,9 +60,56 @@ note() { # note <msg> — to the console and to syslog
 	logger -t firstboot_user "$*"
 }
 
+# If the display has no DRM device (/dev/dri/card0, present only on a
+# real graphics card with a KMS driver), Xorg cannot start in the
+# framebuffer: it exits
+# "Cannot run in framebuffer mode. Please specify busIDs" and LightDM
+# shows a blank screen (a bhyve guest is one). The desktop profile ships
+# the fallback /usr/local/share/@SLUG@/xorg/20-scfb.conf (Driver "scfb").
+# The function runs at every boot, before the guard of the configuration,
+# so it does not depend on the first-boot user:
+#   - with no card0, the fallback is copied into
+#     /usr/local/etc/X11/xorg.conf.d/ when no file of that name is there
+#     yet (a file the administrator put there is kept) and the directory
+#     is writable or can be created (a read-only tree is left alone; the
+#     live media mount /usr/local/etc on a tmpfs);
+#   - with card0 (a KMS driver appeared later), the installed fallback is
+#     removed, so it never shadows the real driver, but only when it is
+#     byte-identical to the shipped source (the copy this script made); a
+#     file that differs belongs to the administrator and is kept.
+install_x_fallback() {
+	_src=/usr/local/share/@SLUG@/xorg/20-scfb.conf
+	_dir=/usr/local/etc/X11/xorg.conf.d
+	_dst="$_dir/20-scfb.conf"
+	[ -f "$_src" ] || return 0
+	if [ -e /dev/dri/card0 ]; then
+		if [ -f "$_dst" ] && cmp -s "$_src" "$_dst"; then
+			if rm -f "$_dst"; then
+				note "removed the X fallback $_dst: the display has a DRM device"
+			else
+				note "could not remove the X fallback $_dst (the display has a DRM device)"
+			fi
+		fi
+		return 0
+	fi
+	[ -e "$_dst" ] && return 0
+	mkdir -p "$_dir" 2> /dev/null || return 0
+	[ -w "$_dir" ] || return 0
+	if cp "$_src" "$_dst"; then
+		note "installed the X fallback $_dst for the console display"
+	else
+		note "could not install the X fallback $_dst for the console display"
+	fi
+	return 0
+}
+
 firstboot_user_start() {
 	local _conf=$firstboot_user_conf
 	local _k _l _v _user _full _keys _nkeys _hash _wheel _home _homebase _n
+
+	# the console display (a bhyve guest, or any seat without a KMS
+	# driver): the X fallback, whether or not a user is configured
+	install_x_fallback
 
 	# the guard: no configuration, nothing to do
 	if [ ! -f "$_conf" ]; then
