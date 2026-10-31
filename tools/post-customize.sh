@@ -40,9 +40,11 @@
 #     the /etc of the overlay would never reach the installed system. The
 #     fstab of the live media (which mounts /etc, /var, /tmp and /root on
 #     a tmpfs) never reaches the installed system either,
-#   - it creates the sentinel of the first boot: only mkimg creates one,
-#     and /etc/rc runs the scripts with the keyword firstboot only while
-#     the sentinel is there.
+#   - it does NOT create the sentinel of the first boot (/firstboot):
+#     the mkimg target of the release tooling creates it in the disk
+#     image itself, and the release root also becomes the read-only ISO,
+#     where the stock /etc/rc fails to remove it ("rm: /firstboot:
+#     Read-only file system").
 #
 # The files are parsed, never evaluated: the fragments are read line by
 # line, and only the KEY="value" lines of rc.conf(5) are used.
@@ -70,6 +72,14 @@ REMOVE=${7:--}
 KEEP=${8:--}
 
 [ -d "$ROOT" ] || die "no such release root: $ROOT"
+
+# GETTY goes into grep patterns and sed scripts: it is checked before
+# anything is changed. The names are the ones of the devices of
+# DragonFly (ttyd0 the first serial port, ttyv0 the first virtual
+# console); anything else is refused.
+if [ -n "$GETTY" ] && ! printf '%s\n' "$GETTY" | grep -Eq '^tty[a-zA-Z]*[0-9]+$'; then
+	die "GETTY must be a tty name such as ttyd0 (the first serial port) or ttyv0 (the first virtual console), matching ^tty[a-zA-Z]*[0-9]+\$ (got: $GETTY); nothing was changed"
+fi
 
 # --------------------------------------------------------------------------
 # the helpers
@@ -109,17 +119,28 @@ merge_rc_conf() {
 	done
 }
 
-# enable_getty <ttys> <tty> — the getty of the tty is switched on. ONLY
-# the status field of the line changes: the getty, the terminal type and
-# the flags after the status stay as the release tooling wrote them.
+# enable_getty <ttys> <tty> <keep|drop> — the getty of the tty is
+# switched on. ONLY the status field of the line changes: the getty, the
+# terminal type and the flags after the status stay as the release
+# tooling wrote them. With drop, the ifconsole flag is removed from the
+# line as well: that is the ttys of the installed system (etc.hdd), whose
+# /boot/loader.conf the installer rewrites without the console line, so
+# a getty that waits for the console to be the serial line never runs
+# there. The live media keep ifconsole (keep).
 enable_getty() {
 	_eg_ttys=$1
 	_eg_tty=$2
+	_eg_ifc=${3:-keep}
 	[ -n "$_eg_tty" ] || return 0
 	[ -f "$_eg_ttys" ] || return 0
 	if grep -q "^$_eg_tty[[:space:]]" "$_eg_ttys"; then
-		sed -E "s|^([[:space:]]*$_eg_tty[[:space:]]+\"[^\"]*\"[[:space:]]+[^[:space:]]+[[:space:]]+)[^[:space:]]+|\\1on|" \
-			"$_eg_ttys" > "$_eg_ttys.new"
+		# the sed expressions: the status is always switched on; the
+		# ifconsole flag is removed only in drop mode
+		set -- -e "s|^([[:space:]]*$_eg_tty[[:space:]]+\"[^\"]*\"[[:space:]]+[^[:space:]]+[[:space:]]+)[^[:space:]]+|\\1on|"
+		if [ "$_eg_ifc" = drop ]; then
+			set -- "$@" -e "/^$_eg_tty[[:space:]]/ s/[[:space:]]*ifconsole//g"
+		fi
+		sed -E "$@" "$_eg_ttys" > "$_eg_ttys.new"
 		cat "$_eg_ttys.new" > "$_eg_ttys"
 		rm -f "$_eg_ttys.new"
 	else
@@ -225,10 +246,12 @@ merge_rc_conf "$ROOT/etc.hdd/rc.conf" "$RC1" $RC2
 # the serial console: the getty of the tty is on and the kernel writes
 # on the console. The tree of the installer has a ttys of its own (the
 # installer copies etc.hdd in place of etc), so the getty of the serial
-# console is switched on there as well.
-enable_getty "$ROOT/etc/ttys" "$GETTY"
+# console is switched on there as well, and only there the ifconsole
+# flag is dropped (the installer writes a loader.conf without the
+# console line).
+enable_getty "$ROOT/etc/ttys" "$GETTY" keep
 if [ -f "$ROOT/etc.hdd/ttys" ]; then
-	enable_getty "$ROOT/etc.hdd/ttys" "$GETTY"
+	enable_getty "$ROOT/etc.hdd/ttys" "$GETTY" drop
 fi
 set_console "$ROOT/boot/loader.conf" "$CONSOLE"
 
@@ -238,11 +261,6 @@ remove_account "$ROOT/etc/master.passwd" "$ROOT/etc/passwd" "$REMOVE"
 lock_uid0 "$ROOT/etc/master.passwd" "$KEEP"
 # the installed system has no account that can be typed into
 lock_uid0 "$ROOT/etc.hdd/master.passwd"
-
-# the sentinel of the first boot: the media carry it. Nothing in the
-# product is guarded by it: the first-boot script is guarded by its own
-# configuration file, not by the sentinel
-: > "$ROOT/firstboot"
 
 log 'post-customize: done'
 exit 0

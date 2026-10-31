@@ -19,8 +19,12 @@
 # directory of DragonFly (check, clean, buildworld1, buildkernel1,
 # buildiso, pkgs, customizeiso, srcs, mkiso, mkimg and release). A
 # target that the Makefile of the directory does not define is an error.
-# "gui" is a modifier of the release, not a target: it is never looked
-# for in the Makefile.
+# "gui", "nopkgs" and "binpkgs" modify the release: upstream declares
+# them as targets with no commands (gui nopkgs binpkgs:) and tests them
+# with make(...), so the stand-in takes them as modifiers, never as
+# targets to run. Every modifier on the command line is kept and logged
+# (MODIFIER <name>, one line each); gui adds the skeleton of the GUI to
+# ROOTSKELS.
 #
 # The release tooling of DragonFly is mirrored here (upstream
 # nrelease/Makefile):
@@ -62,7 +66,7 @@ fixtures="$here/../fixtures"
 
 dir=.
 targets=''
-modifier=''
+modifiers=''
 rootskels_cmdline=''
 
 while [ $# -gt 0 ]; do
@@ -98,11 +102,10 @@ while [ $# -gt 0 ]; do
 		shift
 		;;
 	*)
-		if [ "$1" = gui ]; then
-			modifier=gui
-		else
-			targets="$targets $1"
-		fi
+		case $1 in
+		gui | nopkgs | binpkgs) modifiers="$modifiers $1" ;;
+		*) targets="$targets $1" ;;
+		esac
 		shift
 		;;
 	esac
@@ -169,7 +172,9 @@ make_rootskels() { # make_rootskels <dir> <gui?>
 if [ -n "$rootskels_cmdline" ]; then
 	ROOTSKELS=$rootskels_cmdline
 else
-	ROOTSKELS=$(make_rootskels "$dir" "$modifier")
+	_gui=''
+	case " $modifiers " in *' gui '*) _gui=gui ;; esac
+	ROOTSKELS=$(make_rootskels "$dir" "$_gui")
 fi
 
 # --------------------------------------------------------------------------
@@ -259,6 +264,10 @@ media_content() { # media_content <file>
 	_mc_n=$((_mc_n + 1))
 	{
 		printf 'media call %s\n' "$_mc_n"
+		# the image size the build hands to the release tooling as
+		# IMGSIZE_MB (over the environment) is written into the media,
+		# so a test can say the size reached the media
+		[ -n "${IMGSIZE_MB:-}" ] && printf 'image-size: %s\n' "$IMGSIZE_MB"
 		if [ -f "$ISOROOT/boot/loader.conf" ]; then
 			sed 's/^/loader.conf: /' "$ISOROOT/boot/loader.conf"
 		fi
@@ -282,7 +291,9 @@ target_mkimg() {
 
 for _t in $targets; do
 	printf 'TARGET %s\n' "$_t" >> "$STUB_LOG"
-	[ -z "$modifier" ] || printf 'MODIFIER %s\n' "$modifier" >> "$STUB_LOG"
+	for _m in $modifiers; do
+		printf 'MODIFIER %s\n' "$_m" >> "$STUB_LOG"
+	done
 	case $_t in
 	check)
 		target_check

@@ -1,0 +1,37 @@
+#!/bin/sh
+#
+# tests/stubs/stat — a stand-in for the BSD stat(1) used by the test suite.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The suite also runs on Linux, whose stat(1) (GNU coreutils) reads -f as
+# "file system status", not as the format of the BSD stat(1). The build
+# runs on DragonFly and uses the BSD form only: stat -f %z FILE..., which
+# prints the size of each file in bytes, one line per file (stat(1) of
+# DragonFly and FreeBSD: the format -f, the field z "the size of file in
+# bytes"). The stand-in implements exactly that form and refuses every
+# other one, so that a build.sh that asks stat(1) for something else
+# fails the test. The size is the apparent size (the bytes of the file),
+# counted with wc -c, as stat(2) st_size reports it.
+
+set -eu
+
+[ "${1:-}" = -f ] && [ "${2:-}" = '%z' ] || {
+	printf 'stat: the stand-in knows only: stat -f %%z file...\n' >&2
+	exit 2
+}
+shift 2
+[ $# -gt 0 ] || {
+	printf 'usage: stat -f %%z file...\n' >&2
+	exit 1
+}
+rc=0
+for f in "$@"; do
+	if [ -f "$f" ]; then
+		wc -c < "$f" | tr -d ' \t'
+	else
+		printf 'stat: %s: No such file or directory\n' "$f" >&2
+		rc=1
+	fi
+done
+exit "$rc"
