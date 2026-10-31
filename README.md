@@ -47,7 +47,8 @@ Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see `LICENSE`).
 │       ├── appliance/          headless: packages.list, rc.conf.d/sshd,
 │       │                       etc/ssh/sshd_config
 │       └── desktop/            X11 only: packages.list, rc.conf.d/{dbus,sshd},
-│                               rc.conf.installed.d/lightdm, the LightDM
+│                               rc.conf.installed.d/lightdm,
+│                               sysctl.conf.d/evdev, the LightDM
 │                               configuration, the scfb X fallback
 │                               (the software-framebuffer X driver, so X11
 │                               starts on a VM or machine without a GPU driver)
@@ -81,6 +82,14 @@ Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see `LICENSE`).
   variable per file. DragonFly's `rc.conf(5)` is a single file like
   FreeBSD's, so `build.sh` merges the fragments into the `rc.conf` of
   the release root; the fragments themselves are not shipped in the media.
+- `sysctl.conf.d` fragments (base, then profile) hold `sysctl.conf(5)`
+  lines (`name=value`). `build.sh` appends them, below a marker line per
+  fragment, to the stock `/etc/sysctl.conf` of the live media **and** of
+  the installed system (`etc.hdd`); a name already set there gets the
+  new value in place. An overlay `etc/sysctl.conf` would replace the
+  stock file instead. The desktop sets `kern.evdev.rcpt_mask=6` this way,
+  so that keys reach Xorg through kbdmux (needed under bhyve, harmless on
+  real hardware).
 - `rc.conf.installed.d` fragments (base, then profile) follow the same
   rules but reach **only the installed system** (`etc.hdd/rc.conf`). Put
   there what must not run on the live media. The desktop does this with
