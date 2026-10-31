@@ -1,9 +1,0 @@
-# overlay/profiles/desktop/rc.conf.d/lightdm — the greeter of the desktop.
-#
-# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
-#
-# One rc.conf(5) variable per file. DragonFly's rc.conf(5) is a single
-# file like FreeBSD's, so build.sh merges these fragments into the staged
-# /etc/rc.conf. The desktop boots to the LightDM greeter on X11.
-#
-lightdm_enable="YES"
