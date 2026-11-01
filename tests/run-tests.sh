@@ -648,7 +648,7 @@ FAKE_LOG="$work/fake.log" \
 	PATH="$work/fakehost/bin:$PATH" \
 	WTFBSD_TEST_ALLOW_NONROOT=1 \
 	WTFBSD_BHYVE_STATE="$work/fakehost/state" \
-	WTFBSD_BHYVE_FIRMWARE= \
+	WTFBSD_BHYVE_FIRMWARE='' \
 	WTFBSD_BHYVE_NMDM_BASE="$work/fakehost/nmdm/" \
 	WTFBSD_BHYVE_TAP_BASE="$work/fakehost/tap" \
 	WTFBSD_BHYVE_BRIDGE=bridge0 \
@@ -664,6 +664,87 @@ else
 	no "(B1) the provider writes the serial console into a file and records its reader)"
 	ls -R "$work/fakehost/state" 2>/dev/null | sed 's/^/      | /'
 	sed 's/^/      | /' "$work/bhyve1.log"
+fi
+
+# (B9) the provider runs as root and keeps the state of the VMs in a
+#      directory. A fixed name in a shared temporary directory can be
+#      made first by another user, or be a symbolic link that user
+#      planted, and so can any directory above it: root would then write
+#      and remove where that user says. The default is a directory of
+#      root; a state directory that is a symbolic link, sits below a link
+#      root does not own or below a directory others can write to, or is
+#      writable by others itself, is refused; a new one is made 0700.
+#      Every case runs the provider itself.
+_sd="$work/statedir"
+rm -rf "$_sd"
+mkdir -p "$_sd/bin" "$_sd/target/victim" "$_sd/elsewhere/state/victim" "$_sd/openparent/state/victim" \
+	"$_sd/openself/victim"
+: > "$_sd/target/victim/keep"
+: > "$_sd/elsewhere/state/victim/keep"
+: > "$_sd/openparent/state/victim/keep"
+: > "$_sd/openself/victim/keep"
+: > "$_sd/image.img"
+: > "$_sd/firmware.fd"
+chmod 700 "$_sd/elsewhere/state" "$_sd/openparent/state"
+chmod 777 "$_sd/openparent" "$_sd/openself"
+printf '#!/bin/sh\nif [ "$1" = -u ]; then echo 0; exit 0; fi\nexec /usr/bin/id "$@"\n' > "$_sd/bin/id"
+for _sdt in ifconfig sleep bhyve bhyvectl kldstat kldload; do
+	printf '#!/bin/sh\nexit 0\n' > "$_sd/bin/$_sdt"
+done
+chmod 755 "$_sd/bin/"*
+ln -s "$_sd/target" "$_sd/link"
+ln -s "$_sd/elsewhere" "$_sd/plink"
+_sdrun() { # _sdrun <log> <state dir> <command> <args...> — run the provider once
+	_sdlog=$1 _sddir=$2
+	shift 2
+	WTFBSD_TEST_ALLOW_NONROOT=1 WTFBSD_BHYVE_NMDM_WAIT=0 WTFBSD_BHYVE_NMDM_BASE="$_sd/nonmdm/" PATH="$_sd/bin:$PATH" WTFBSD_BHYVE_STATE="$_sddir" WTFBSD_BHYVE_CONSOLE="$_sddir" \
+		sh "$repo/ci/providers/bhyve.sh" "$@" > "$_sdlog" 2>&1
+	_sdrc=$?
+}
+_sdrun "$_sd/link.log" "$_sd/link" destroy victim
+if [ "$_sdrc" -ne 0 ] && [ -f "$_sd/target/victim/keep" ] && grep -q 'it is a symbolic link' "$_sd/link.log"; then
+	ok "(B9) the provider refuses a state directory that is a symbolic link, and removes nothing through it"
+else
+	no "(B9) the provider refuses a state directory that is a symbolic link, and removes nothing through it (rc=$_sdrc)"
+	sed 's/^/      | /' "$_sd/link.log"
+fi
+_sdrun "$_sd/plink.log" "$_sd/plink/state" destroy victim
+if [ "$_sdrc" -ne 0 ] && [ -f "$_sd/elsewhere/state/victim/keep" ] &&
+	grep -q 'plink is a symbolic link that root does not own' "$_sd/plink.log"; then
+	ok "(B9) the provider refuses a state directory below a symbolic link root does not own, and removes nothing through it"
+else
+	no "(B9) the provider refuses a state directory below a symbolic link root does not own, and removes nothing through it (rc=$_sdrc)"
+	sed 's/^/      | /' "$_sd/plink.log"
+fi
+_sdrun "$_sd/openparent.log" "$_sd/openparent/state" destroy victim
+if [ "$_sdrc" -ne 0 ] && [ -f "$_sd/openparent/state/victim/keep" ] &&
+	grep -q 'others can write to .*/openparent$' "$_sd/openparent.log"; then
+	ok "(B9) the provider refuses a state directory below a directory others can write to"
+else
+	no "(B9) the provider refuses a state directory below a directory others can write to (rc=$_sdrc)"
+	sed 's/^/      | /' "$_sd/openparent.log"
+fi
+_sdrun "$_sd/openself.log" "$_sd/openself" destroy victim
+if [ "$_sdrc" -ne 0 ] && [ -f "$_sd/openself/victim/keep" ] && grep -q 'others can write to it' "$_sd/openself.log"; then
+	ok "(B9) the provider refuses a state directory others can write to"
+else
+	no "(B9) the provider refuses a state directory others can write to (rc=$_sdrc)"
+	sed 's/^/      | /' "$_sd/openself.log"
+fi
+# create makes a new state directory 0700 (the run stops later, at the
+# serial device the test host does not have)
+_sdrun "$_sd/new.log" "$_sd/new/state" create probe "$_sd/image.img"
+_sdmode=$(ls -ld "$_sd/new/state" 2> /dev/null | cut -c1-10)
+if [ "$_sdmode" = 'drwx------' ]; then
+	ok "(B9) a new state directory of the provider is made 0700"
+else
+	no "(B9) a new state directory of the provider is made 0700 (got: $_sdmode)"
+	sed 's/^/      | /' "$_sd/new.log"
+fi
+if grep -q '/var/db/wtfbsd-vm' "$repo/ci/providers/bhyve.sh" && ! grep -q '/var/tmp/wtfbsd-vm' "$repo/ci/providers/bhyve.sh"; then
+	ok "(B9) the default state directory of the provider is a directory of root, not in /var/tmp"
+else
+	no "(B9) the default state directory of the provider is a directory of root, not in /var/tmp"
 fi
 
 # (B2) the boot test takes the name of the VM, the pipeline lists the VMs
@@ -854,7 +935,7 @@ FAKE_LOG="$work/fake.log" \
 	PATH="$work/fakehost/bin:$PATH" \
 	WTFBSD_TEST_ALLOW_NONROOT=1 \
 	WTFBSD_BHYVE_STATE="$work/fakehost/state" \
-	WTFBSD_BHYVE_FIRMWARE= \
+	WTFBSD_BHYVE_FIRMWARE='' \
 	WTFBSD_BHYVE_NMDM_BASE="$work/fakehost/nmdm/" \
 	WTFBSD_BHYVE_TAP_BASE="$work/fakehost/tap" \
 	WTFBSD_BHYVE_BRIDGE=bridge0 \
@@ -1000,7 +1081,7 @@ rm -f "$probe"
 # --------------------------------------------------------------------------
 # (k) opencode.json is valid JSON and names no provider, model or key
 # --------------------------------------------------------------------------
-if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$repo/opencode.json" > "$work/json.log" 2>&1; then
+if python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' "$repo/opencode.json" > "$work/json.log" 2>&1; then
 	ok "(k) opencode.json is valid JSON"
 else
 	no "(k) opencode.json is valid JSON"
@@ -1335,6 +1416,85 @@ else
 	no "(C3) the first-boot script is not guarded by the firstboot keyword (got: $fbkw)"
 fi
 
+# the SSH keys go into a home that may already exist. Whoever owns that
+# home can plant symbolic links in it; root must not write, chmod or
+# chown through them. A .ssh that is a link to a directory of root, and
+# an authorized_keys that is a link to a password file, are refused and
+# said, and the targets are left as they were. A configuration path with
+# a space in it works.
+fbl="$work/fblink"
+mkdir -p "$fbl/rootdir" "$fbl/conf dir"
+printf 'root:*:0:0:the master password file stand-in:/root:/bin/sh\n' > "$fbl/master.passwd"
+cp "$fbl/master.passwd" "$fbl/master.passwd.orig"
+fblrun() { # fblrun <name> <user> <conf> — run the script for one user
+	printf '%s:x:1001:1001:Fb User:%s/home/%s:/bin/sh\n' "$2" "$work/fbroot" "$2" \
+		> "$work/fbroot/etc/passwd"
+	printf 'USERNAME=%s\nWHEEL=no\nSSH_KEY=%s %s fbl\n' "$2" 'ssh-ed25519' 'fbldata' > "$3"
+	: > "$fbl/$1.chown"
+	PATH="$work/fakebin:$PATH" PW_LOG="$fbl/$1.pw" LOGGER_LOG="$fbl/$1.logger" \
+		CHOWN_LOG="$fbl/$1.chown" firstboot_user_conf="$3" \
+		sh "$work/fbroot/etc/rc.d/firstboot_user" start > "$fbl/$1.out" 2>&1
+	fblrc=$?
+}
+mkdir -p "$work/fbroot/home/fbla"
+ln -s "$fbl/rootdir" "$work/fbroot/home/fbla/.ssh"
+fblrun a fbla "$fbl/a.conf"
+if [ "$fblrc" -ne 0 ] && grep -q 'refused.*fbla/.ssh is a symbolic link' "$fbl/a.out" &&
+	[ -z "$(ls -A "$fbl/rootdir")" ] && [ ! -s "$fbl/a.chown" ]; then
+	ok "(C3) a .ssh that is a symbolic link is refused, and its target is untouched"
+else
+	no "(C3) a .ssh that is a symbolic link is refused, and its target is untouched (rc=$fblrc)"
+	sed 's/^/      | /' "$fbl/a.out"
+fi
+mkdir -p "$work/fbroot/home/fblb/.ssh"
+ln -s "$fbl/master.passwd" "$work/fbroot/home/fblb/.ssh/authorized_keys"
+fblrun b fblb "$fbl/b.conf"
+if [ "$fblrc" -ne 0 ] && grep -q 'refused.*authorized_keys is a symbolic link' "$fbl/b.out" &&
+	cmp -s "$fbl/master.passwd" "$fbl/master.passwd.orig" && [ ! -s "$fbl/b.chown" ]; then
+	ok "(C3) an authorized_keys that is a symbolic link is refused, and the file it names is untouched"
+else
+	no "(C3) an authorized_keys that is a symbolic link is refused, and the file it names is untouched (rc=$fblrc)"
+	sed 's/^/      | /' "$fbl/b.out"
+fi
+# the home sits below a symbolic link nobody but its maker trusts
+mkdir -p "$fbl/elsewhere/fblp"
+ln -s "$fbl/elsewhere" "$work/fbroot/home/plink"
+printf 'USERNAME=fblp\nWHEEL=no\nSSH_KEY=%s %s fbl\n' 'ssh-ed25519' 'fbldata' > "$fbl/p.conf"
+printf 'fblp:x:1001:1001:Fb User:%s/home/plink/fblp:/bin/sh\n' "$work/fbroot" > "$work/fbroot/etc/passwd"
+: > "$fbl/p.chown"
+PATH="$work/fakebin:$PATH" PW_LOG="$fbl/p.pw" LOGGER_LOG="$fbl/p.logger" \
+	CHOWN_LOG="$fbl/p.chown" firstboot_user_conf="$fbl/p.conf" \
+	sh "$work/fbroot/etc/rc.d/firstboot_user" start > "$fbl/p.out" 2>&1
+fblrc=$?
+rm -f "$work/fbroot/home/plink"
+if [ "$fblrc" -ne 0 ] && grep -q 'refused.*plink is a symbolic link that root does not own' "$fbl/p.out" &&
+	[ ! -e "$fbl/elsewhere/fblp/.ssh" ] && [ ! -s "$fbl/p.chown" ]; then
+	ok "(C3) a home below a symbolic link root does not own is refused, and nothing is written through it"
+else
+	no "(C3) a home below a symbolic link root does not own is refused, and nothing is written through it (rc=$fblrc)"
+	sed 's/^/      | /' "$fbl/p.out"
+fi
+mkdir -p "$work/fbroot/home/fblc"
+fblrun c fblc "$fbl/conf dir/firstboot-user.conf"
+fblak="$work/fbroot/home/fblc/.ssh/authorized_keys"
+fblmode=$(ls -ld "$fblak" 2>/dev/null | cut -c1-10)
+if [ "$fblrc" -eq 0 ] && grep -qx 'ssh-ed25519 fbldata fbl' "$fblak" 2>/dev/null &&
+	[ "$fblmode" = '-rw-------' ] && [ ! -L "$fblak" ] &&
+	[ -f "$fbl/conf dir/firstboot-user.conf.done" ] &&
+	grep -qx 'chown -h fblc authorized_keys .' "$fbl/c.chown"; then
+	ok "(C3) the keys are installed 0600 and given to the user (a configuration path with a space)"
+else
+	no "(C3) the keys are installed 0600 and given to the user (a configuration path with a space) (rc=$fblrc mode=$fblmode)"
+	sed 's/^/      | /' "$fbl/c.out"
+fi
+# the path of the configuration is quoted where it is read: some sh split
+# the unquoted word of local
+if grep -q '^	local _conf="\$firstboot_user_conf"$' "$fbscript"; then
+	ok "(C3) the configuration path is quoted in local"
+else
+	no "(C3) the configuration path is quoted in local"
+fi
+
 # the password hash of the first-boot user
 realbuild "$work/fbhash" -u ciuser -k "$work/ci.pub" -P "$work/pass.hash"
 fbhashconf="$work/fbhash/out/appliance/root/boot/firstboot-user.conf"
@@ -1438,7 +1598,7 @@ FAKE_LOG="$work/fake1.log" \
 	PATH="$work/fakehost/bin:$PATH" \
 	WTFBSD_TEST_ALLOW_NONROOT=1 \
 	WTFBSD_BHYVE_STATE="$work/fakehost/state" \
-	WTFBSD_BHYVE_FIRMWARE= \
+	WTFBSD_BHYVE_FIRMWARE='' \
 	WTFBSD_BHYVE_NMDM_BASE="$work/fakehost/nmdm/" \
 	WTFBSD_BHYVE_TAP_BASE="$work/fakehost/tap" \
 	WTFBSD_BHYVE_BRIDGE=bridge0 \
@@ -1467,7 +1627,7 @@ FAKE_LOG="$work/fake2.log" \
 	PATH="$work/fakehost/bin:$PATH" \
 	WTFBSD_TEST_ALLOW_NONROOT=1 \
 	WTFBSD_BHYVE_STATE="$work/fakehost/state" \
-	WTFBSD_BHYVE_FIRMWARE= \
+	WTFBSD_BHYVE_FIRMWARE='' \
 	WTFBSD_BHYVE_NMDM_BASE="$work/fakehost/nmdm/" \
 	WTFBSD_BHYVE_TAP_BASE="$work/fakehost/tap" \
 	WTFBSD_BHYVE_BRIDGE=bridge0 \
@@ -1506,7 +1666,7 @@ FAKE_LOG="$work/fake4.log" \
 	PATH="$work/fakehost/bin:$PATH" \
 	WTFBSD_TEST_ALLOW_NONROOT=1 \
 	WTFBSD_BHYVE_STATE="$work/fakehost/state" \
-	WTFBSD_BHYVE_FIRMWARE= \
+	WTFBSD_BHYVE_FIRMWARE='' \
 	WTFBSD_BHYVE_NMDM_BASE="$work/fakehost/nmdm/" \
 	WTFBSD_BHYVE_TAP_BASE="$work/fakehost/tap" \
 	WTFBSD_TEST_FAKE_NMDM=1 \
@@ -1543,7 +1703,7 @@ fi
 # removed: a word in a comment must never make a case pass.
 jenkins_code() { # jenkins_code — the pipeline without its Groovy comments
 	_q="'''"
-	awk -v q="$_q" '
+	q="$_q" awk 'BEGIN { q = ENVIRON["q"] }
 		{
 			line = $0
 			sub(/\/\/.*/, "", line)
@@ -1554,7 +1714,7 @@ jenkins_code() { # jenkins_code — the pipeline without its Groovy comments
 jenkins_groovy() { # jenkins_groovy — the pipeline without its shell strings
 	_q="'''"
 	_d="\"\"\""
-	awk -v q="$_q" -v d="$_d" '
+	q="$_q" d="$_d" awk 'BEGIN { q = ENVIRON["q"]; d = ENVIRON["d"] }
 		BEGIN { insh = 0 }
 		index($0, q) { insh = ! insh; print "SH"; next }
 		index($0, d) { insh = ! insh; print "SH"; next }

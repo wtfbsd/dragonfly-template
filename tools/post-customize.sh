@@ -121,7 +121,7 @@ merge_rc_conf() {
 				esac
 				_mc_key=${_mc_line%%=*}
 				if grep -q "^$_mc_key=" "$_mc_conf" 2>/dev/null; then
-					awk -v k="$_mc_key" -v v="$_mc_line" '
+					k="$_mc_key" v="$_mc_line" awk 'BEGIN { k = ENVIRON["k"]; v = ENVIRON["v"] }
 						index($0, k "=") == 1 { print v; next }
 						{ print }' "$_mc_conf" > "$_mc_conf.new"
 					cat "$_mc_conf.new" > "$_mc_conf"
@@ -148,12 +148,12 @@ enable_getty() {
 	_eg_ifc=${3:-keep}
 	[ -n "$_eg_tty" ] || return 0
 	[ -f "$_eg_ttys" ] || return 0
-	if grep -q "^$_eg_tty[[:space:]]" "$_eg_ttys"; then
+	if grep -q "^${_eg_tty}[[:space:]]" "$_eg_ttys"; then
 		# the sed expressions: the status is always switched on; the
 		# ifconsole flag is removed only in drop mode
-		set -- -e "s|^([[:space:]]*$_eg_tty[[:space:]]+\"[^\"]*\"[[:space:]]+[^[:space:]]+[[:space:]]+)[^[:space:]]+|\\1on|"
+		set -- -e "s|^([[:space:]]*${_eg_tty}[[:space:]]+\"[^\"]*\"[[:space:]]+[^[:space:]]+[[:space:]]+)[^[:space:]]+|\\1on|"
 		if [ "$_eg_ifc" = drop ]; then
-			set -- "$@" -e "/^$_eg_tty[[:space:]]/ s/[[:space:]]*ifconsole//g"
+			set -- "$@" -e "/^${_eg_tty}[[:space:]]/ s/[[:space:]]*ifconsole//g"
 		fi
 		sed -E "$@" "$_eg_ttys" > "$_eg_ttys.new"
 		cat "$_eg_ttys.new" > "$_eg_ttys"
@@ -192,7 +192,7 @@ lock_uid0() {
 	[ -f "$_lu_file" ] || return 0
 	(
 		umask 077
-		awk -F: -v keep="$_lu_keep" 'BEGIN { OFS = ":" } $3 == 0 && $1 != keep { $2 = "*" } { print }' \
+		keep="$_lu_keep" awk -F: 'BEGIN { keep = ENVIRON["keep"] } BEGIN { OFS = ":" } $3 == 0 && $1 != keep { $2 = "*" } { print }' \
 			"$_lu_file" > "$_lu_file.new"
 	)
 	mv "$_lu_file.new" "$_lu_file"
@@ -214,7 +214,7 @@ remove_account() {
 		esac
 		(
 			umask "$_ra_umask"
-			awk -F: -v n="$_ra_name" 'BEGIN { OFS = ":" } $1 != n { print }' \
+			n="$_ra_name" awk -F: 'BEGIN { n = ENVIRON["n"] } BEGIN { OFS = ":" } $1 != n { print }' \
 				"$_ra_file" > "$_ra_file.new"
 		)
 		mv "$_ra_file.new" "$_ra_file"
@@ -332,8 +332,8 @@ mirror_etc_hdd "$ROOT" "$ROOTSKELS"
 # the variables of the overlay reach the rc.conf of the live media and
 # the rc.conf of the installed system (the installer copies etc.hdd in
 # place of etc)
-merge_rc_conf "$ROOT/etc/rc.conf" "$RC1" $RC2
-merge_rc_conf "$ROOT/etc.hdd/rc.conf" "$RC1" $RC2
+merge_rc_conf "$ROOT/etc/rc.conf" "$RC1" ${RC2:+"$RC2"}
+merge_rc_conf "$ROOT/etc.hdd/rc.conf" "$RC1" ${RC2:+"$RC2"}
 
 # the sysctl lines of the overlay reach the sysctl.conf of the live media
 # and of the installed system; the stock file of each stays and is

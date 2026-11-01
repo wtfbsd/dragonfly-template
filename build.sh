@@ -852,8 +852,8 @@ for p in $profiles; do
 	if [ "$DRY" -ne 1 ]; then
 		_mpw="$ISOROOT/etc/master.passwd"
 		[ -f "$_mpw" ] || die "the release root holds no password database ($_mpw)"
-		_bad=$(awk -F: -v keep="$_keepacct" \
-			'$3 == 0 && $1 != keep && $2 != "*" && $2 != "!" && $2 != "!!" { print $1 "(" $2 ")" }' "$_mpw")
+		_bad=$(keep="$_keepacct" awk -F: \
+			'BEGIN { keep = ENVIRON["keep"] } $3 == 0 && $1 != keep && $2 != "*" && $2 != "!" && $2 != "!!" { print $1 "(" $2 ")" }' "$_mpw")
 		[ -z "$_bad" ] || die "the release root holds a uid-0 account with a password that can be typed: $_bad"
 		if [ "$p" = appliance ]; then
 			if grep -q '^installer:' "$_mpw"; then
