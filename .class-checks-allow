@@ -1,0 +1,9 @@
+# class-checks allow-list (agents/tools/class-checks): CLASS PATH:LINE REASON
+shellcheck ci/providers/bhyve.sh:144 the provider runs on a FreeBSD host, whose sh and test(1) have -O
+shellcheck ci/providers/bhyve.sh:187 the provider runs on a FreeBSD host, whose sh and test(1) have -O
+shellcheck overlay/base/rootfs/etc/rc.d/firstboot_user:180 the script runs as root under the BSD /bin/sh, whose test has -O
+shellcheck overlay/base/rootfs/etc/rc.d/firstboot_user:279 local is a builtin of the BSD /bin/sh this script runs under
+shellcheck overlay/base/rootfs/etc/rc.d/firstboot_user:280 local is a builtin of the BSD /bin/sh this script runs under
+tmp-predictable tests/run-tests.sh:744 a grep pattern that checks the old default state path is gone, nothing is written there
+unquoted-expansion build.sh:768 the nrelease targets are fixed make target names, split on purpose
+unquoted-expansion build.sh:837 the nrelease targets are fixed make target names, split on purpose
