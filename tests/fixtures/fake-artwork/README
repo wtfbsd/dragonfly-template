@@ -1,0 +1,11 @@
+tests/fixtures/fake-artwork — the artwork template for the test suite.
+
+Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+
+branding/spots.tsv, the palettes and scripts/identity-file.sh with
+scripts/lib-identity.sh are copied unchanged from artwork-template 353ef29
+(the pinned ARTWORK_REF). scripts/make-out.sh writes a placeholder for every
+file the render of the template makes for DragonFly (text instead of
+images), scripts/identity-stamp.sh "stamps" by appending the identity to
+the file, and scripts/render.sh is the source-checkout path. The suite makes
+packs (scripts/pack.sh layout: PACK, out/, ...) from this tree.

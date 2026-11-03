@@ -20,6 +20,17 @@
 #   SSH_KEY=ssh-...       one authorized_keys line, repeatable
 #   PASSWORD_HASH=$6$...  crypt(3) starting with $6$, $5$ or $2b$ (optional)
 #   WHEEL=yes|no          default yes
+#   HOSTNAME=host.example the host name (rc.conf hostname)      (optional)
+#   TIMEZONE=Europe/Paris a zoneinfo name (/etc/localtime)      (optional)
+#   KEYMAP=us.iso         a syscons keymap (rc.conf keymap)     (optional)
+#   ROOT_PASSWORD_HASH=$6$... root gets this password (otherwise root
+#                         stays locked)                       (optional)
+#   DOAS_NOPASS=yes|no    the wheel user may use doas without its
+#                         password (default no)
+#
+# The live installer (@SLUG@-install) writes HOSTNAME, TIMEZONE and KEYMAP
+# with the answers of the operator; they are applied on the first boot
+# of the installed system, like the account.
 #
 # The script guards itself: while the configuration file is absent it
 # provisions nothing (only the X fallback of the console display below
@@ -113,6 +124,21 @@ install_x_fallback() {
 		note "could not install the X fallback $_dst for the console display"
 	fi
 	return 0
+}
+
+# set_rc_var <name> <value> — the variable of /etc/rc.conf gets the
+# value: the line of the variable is replaced, or one is appended. The
+# value is checked by the caller (no quote, no newline).
+set_rc_var() {
+	local _f=/etc/rc.conf
+	[ -f "$_f" ] || : > "$_f" || return 1
+	if grep -q "^$1=" "$_f"; then
+		RCV_KEY=$1 RCV_LINE="$1=\"$2\"" awk '
+			index($0, ENVIRON["RCV_KEY"] "=") == 1 { print ENVIRON["RCV_LINE"]; next }
+			{ print }' "$_f" > "$_f.new" && cat "$_f.new" > "$_f" && rm -f "$_f.new"
+	else
+		printf '%s="%s"\n' "$1" "$2" >> "$_f"
+	fi
 }
 
 # fbu_owned_by <path> <uid>... — is <path> itself (a symbolic link is not
@@ -278,6 +304,7 @@ fbu_install_keys() {
 firstboot_user_start() {
 	local _conf="$firstboot_user_conf"
 	local _k _l _v _user _full _keys _nkeys _hash _wheel _home _homebase _probe _n
+	local _host _tz _kmap _nopass _roothash
 
 	# the console display (a bhyve guest, or any seat without a KMS
 	# driver): the X fallback, whether or not a user is configured
@@ -295,6 +322,11 @@ firstboot_user_start() {
 	_nkeys=0
 	_hash=''
 	_wheel='yes'
+	_host=''
+	_tz=''
+	_kmap=''
+	_nopass='no'
+	_roothash=''
 	# the certificate key types of OpenSSH carry the name of the project
 	# as their domain; the domain is kept in a variable, so that the
 	# name of the type does not look like an email address
@@ -362,6 +394,49 @@ $_v"
 				;;
 			esac
 			_wheel=$_v
+			;;
+		ROOT_PASSWORD_HASH)
+			case $_v in
+			'$6$'*) ;;
+			*)
+				note 'ROOT_PASSWORD_HASH must be a crypt(3) string starting with $6$'
+				return 1
+				;;
+			esac
+			_roothash=$_v
+			;;
+		DOAS_NOPASS)
+			case $_v in
+			yes | no) ;;
+			*)
+				note "DOAS_NOPASS must be yes or no (got: $_v)"
+				return 1
+				;;
+			esac
+			_nopass=$_v
+			;;
+		HOSTNAME)
+			if ! printf '%s\n' "$_v" | grep -Eq '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'; then
+				note "HOSTNAME is not a host name: $_v"
+				return 1
+			fi
+			_host=$_v
+			;;
+		TIMEZONE)
+			if ! printf '%s\n' "$_v" | grep -Eq '^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$' ||
+				[ ! -f "/usr/share/zoneinfo/$_v" ]; then
+				note "TIMEZONE is not a time zone of /usr/share/zoneinfo: $_v"
+				return 1
+			fi
+			_tz=$_v
+			;;
+		KEYMAP)
+			if ! printf '%s\n' "$_v" | grep -Eq '^[A-Za-z0-9._-]+$' ||
+				[ ! -f "/usr/share/syscons/keymaps/$_v.kbd" ]; then
+				note "KEYMAP is not a keymap of /usr/share/syscons/keymaps: $_v"
+				return 1
+			fi
+			_kmap=$_v
 			;;
 		*)
 			note "unknown key in $_conf: $_k"
@@ -441,10 +516,51 @@ $_v"
 	fi
 	note "installed $_nkeys SSH key(s) for $_user at $_home/.ssh/authorized_keys"
 
+	# root: its own password when the installer asked for one
+	if [ -n "$_roothash" ]; then
+		if printf '%s\n' "$_roothash" | pw usermod -n root -H 0; then
+			note 'root password hash applied'
+		else
+			note 'pw usermod -H 0 failed for root'
+			return 1
+		fi
+	fi
+
+	# the host name, the time zone and the keymap of the installer
+	if [ -n "$_host" ]; then
+		set_rc_var hostname "$_host" && hostname "$_host" &&
+			note "host name set to $_host" || {
+			note "could not set the host name $_host"
+			return 1
+		}
+	fi
+	if [ -n "$_tz" ]; then
+		if cp "/usr/share/zoneinfo/$_tz" /etc/localtime &&
+			printf '%s\n' "$_tz" > /var/db/zoneinfo; then
+			note "time zone set to $_tz"
+		else
+			note "could not set the time zone $_tz"
+			return 1
+		fi
+	fi
+	if [ -n "$_kmap" ]; then
+		if set_rc_var keymap "$_kmap"; then
+			# the consoles get it now; syscons reads rc.conf at the
+			# next boot
+			if [ -c /dev/ttyv0 ]; then
+				kbdcontrol -l "/usr/share/syscons/keymaps/$_kmap.kbd" < /dev/ttyv0 > /dev/null 2>&1 || :
+			fi
+			note "keymap set to $_kmap"
+		else
+			note "could not set the keymap $_kmap"
+			return 1
+		fi
+	fi
+
 	# a key-only wheel user (no password to type): let doas accept the
 	# SSH-authenticated session, otherwise the account could never get
 	# root
-	if [ "$_wheel" = yes ] && [ -z "$_hash" ] && [ -f /usr/local/etc/doas.conf ]; then
+	if [ "$_wheel" = yes ] && { [ -z "$_hash" ] || [ "$_nopass" = yes ]; } && [ -f /usr/local/etc/doas.conf ]; then
 		printf 'permit nopass %s\n' "$_user" >> /usr/local/etc/doas.conf
 		note "doas: the key-only wheel user $_user may run commands as root without a password"
 	fi

@@ -30,6 +30,36 @@ build="$repo/build.sh"
 vmsh="$repo/ci/vm.sh"
 boottest="$repo/tests/boot-test.sh"
 fixture="$repo/tests/fixtures/examplebsd-dragonfly.product.conf"
+# the desktop profile needs the installer of the live session: the suite
+# uses the stand-in of tests/fixtures (a case below checks the refusal without)
+INSTALLER_DIR="$repo/tests/fixtures/fake-installer-template"
+export INSTALLER_DIR
+unset INSTALLER_REF INSTALLER_REPO
+# the branding of the desktop: packs of the stand-in artwork template, in
+# the layout of scripts/pack.sh of the artwork template (PACK, out/, ...)
+WTFBSD_BUILD_DATE=2026-11-01
+ARTREF=353ef29aa000eda6c1f274774170a7a691768490
+mkpack() { # mkpack <variant> <dir> [slug] — a pack of the stand-in, and its .sha256; prints its path
+	_mp_n="${3:-examplebsd}-$(printf '%.12s' "$ARTREF")-$1"
+	rm -rf "$2/$_mp_n"
+	mkdir -p "$2/$_mp_n"
+	cp -R "$repo/tests/fixtures/fake-artwork/." "$2/$_mp_n/"
+	sh "$repo/tests/fixtures/fake-artwork/scripts/make-out.sh" "$2/$_mp_n/out" "${3:-examplebsd}" ExampleBSD "$1"
+	printf 'name=%s\ncommit=%s\nvariant=%s\n' "${3:-examplebsd}" "$(printf '%.12s' "$ARTREF")" "$1" > "$2/$_mp_n/PACK"
+	(cd "$2" && tar -cf - "$_mp_n" | xz -1 > "$_mp_n.tar.xz")
+	(cd "$2" && sha256sum "$_mp_n.tar.xz" > "$_mp_n.tar.xz.sha256" 2>/dev/null ||
+		printf '%s  %s\n' "$(sha256 -q "$_mp_n.tar.xz")" "$_mp_n.tar.xz" > "$_mp_n.tar.xz.sha256")
+	rm -rf "$2/$_mp_n"
+	printf '%s\n' "$2/$_mp_n.tar.xz"
+}
+mkdir -p "$work/packs"
+ARTWORK_PACK=$(mkpack default "$work/packs")
+# the packs of the stand-in are not the published ones: the suite pins
+# nothing by default (the cases about the pins name tools/artwork-packs.sha256)
+: > "$work/no-pins.sha256"
+ARTWORK_PACKS_SHA256="$work/no-pins.sha256"
+export ARTWORK_PACK WTFBSD_BUILD_DATE ARTWORK_PACKS_SHA256
+unset ARTWORK_REF ARTWORK_REPO ARTWORK_DIR
 
 # --------------------------------------------------------------------------
 # (a) the DragonFly example as product.conf
@@ -330,6 +360,7 @@ realbuild() { # realbuild <workdir> [more build.sh arguments] — run the real
 	# shellcheck disable=SC2086
 	(
 		cd "$_rb_w" || exit 1
+		[ "${REAL_NO_PACK:-0}" = 1 ] && unset ARTWORK_PACK
 		PATH="${REAL_PATH_PREFIX:+$REAL_PATH_PREFIX:}$repo/tests/stubs:$PATH" \
 		STUB_LOG="$_rb_w/stub.log" \
 		WTFBSD_TEST_ALLOW_ANY_OS=1 \
@@ -3048,15 +3079,15 @@ else
 fi
 rm -f "$fb/etc/master.passwd"
 
-# (L2) LightDM is off on the live media and on in the installed system:
-#      the live desktop boots to the stock installer on ttyv0 and ttyd0
+# (L2) LightDM runs on the live media (it logs the live user in, see LV)
+#      and on the installed system
 REAL_PROFILE=desktop realbuild "$work/l2" -u ciuser -P "$work/pass.hash"
 if [ "$realrc" -eq 0 ] &&
-	! grep -q '^lightdm_enable="YES"' "$realout/desktop/root/etc/rc.conf" 2>/dev/null &&
+	grep -q '^lightdm_enable="YES"$' "$realout/desktop/root/etc/rc.conf" 2>/dev/null &&
 	grep -q '^lightdm_enable="YES"$' "$realout/desktop/root/etc.hdd/rc.conf" 2>/dev/null; then
-	ok "(L2) the desktop enables LightDM only in the rc.conf of the installed system (etc.hdd)"
+	ok "(L2) the desktop enables LightDM in the rc.conf of the live media and of the installed system (etc.hdd)"
 else
-	no "(L2) the desktop enables LightDM only in the rc.conf of the installed system (etc.hdd) (rc=$realrc)"
+	no "(L2) the desktop enables LightDM in the rc.conf of the live media and of the installed system (etc.hdd) (rc=$realrc)"
 	grep -n 'lightdm' "$realout/desktop/root/etc/rc.conf" "$realout/desktop/root/etc.hdd/rc.conf" 2>/dev/null | sed 's/^/      | /'
 fi
 # an image booted as the system itself (no installer account) gets the
@@ -3289,6 +3320,1152 @@ if grep -q 'NOTE: the desktop is built as an ISO; it must stay under 2 GiB' "$wo
 else
 	no "(F10) the 2 GiB note of the desktop ISO is plain ASCII"
 	grep 'NOTE' "$work/f10/iso.log" 2>/dev/null | sed 's/^/      | /'
+fi
+
+# --------------------------------------------------------------------------
+# (LV) the live desktop: the live user, its automatic login, the installer
+#      that opens first, and the install command of the template
+# --------------------------------------------------------------------------
+lv="$work/lv"
+rm -rf "$lv"
+mkdir -p "$lv/bin"
+lvsub() { # lvsub <src> <dst> — a file of the overlay with its placeholders filled
+	sed -e 's/@SLUG@/examplebsd/g' -e 's/@DISTRO_NAME@/ExampleBSD/g' "$1" > "$2" && chmod 755 "$2"
+}
+dov="$repo/overlay/profiles/desktop/rootfs"
+
+# (LV1) the desktop build: LightDM on the live media AND on the installed
+#       system, the live session, the install command, the installer of
+#       installer-template, and a getty on ttyv1 of the live media only
+REAL_PROFILE=desktop realbuild "$work/lv1" -u ciuser -P "$work/pass.hash"
+lv1="$realout/desktop/root"
+lv1sk="$realout/desktop/rootskels"
+if [ "$realrc" -eq 0 ] &&
+	grep -q '^lightdm_enable="YES"$' "$lv1/etc/rc.conf" 2>/dev/null &&
+	grep -q '^lightdm_enable="YES"$' "$lv1/etc.hdd/rc.conf" 2>/dev/null; then
+	ok "(LV1) the desktop enables LightDM on the live media and on the installed system"
+else
+	no "(LV1) the desktop enables LightDM on the live media and on the installed system (rc=$realrc)"
+	grep -n 'lightdm' "$lv1/etc/rc.conf" "$lv1/etc.hdd/rc.conf" 2>/dev/null | sed 's/^/      | /'
+fi
+lv1miss=''
+for f in etc/rc.d/live_session usr/local/sbin/examplebsd-install usr/local/sbin/examplebsd-live-clean \
+	usr/local/bin/after_installation_routines.sh usr/local/share/examplebsd/live/90-live-autologin.conf \
+	usr/local/bin/wtfbsd-installer usr/local/libexec/wtfbsd-installer/installer-apply \
+	usr/local/share/wtfbsd-installer/autostart/wtfbsd-installer.desktop usr/local/share/wtfbsd-installer/MANIFEST; do
+	[ -f "$lv1sk/$f" ] || lv1miss="$lv1miss $f"
+done
+if [ -z "$lv1miss" ]; then
+	ok "(LV1) the staged desktop holds the live session, the install command and the installer launcher"
+else
+	no "(LV1) the staged desktop holds the live session, the install command and the installer launcher; missing:$lv1miss"
+fi
+lv1modes=''
+for f in etc/rc.d/live_session usr/local/sbin/examplebsd-install usr/local/sbin/examplebsd-live-clean \
+	usr/local/bin/after_installation_routines.sh; do
+	src=$(printf %s "$f" | sed 's/examplebsd/@SLUG@/')
+	grep -qxF "CMD chmod 755 $lv1sk/$src" "$work/lv1/stub.log" 2>/dev/null || lv1modes="$lv1modes $f"
+done
+if [ -z "$lv1modes" ]; then
+	ok "(LV1) the scripts of the live session and the install command are made executable (0755)"
+else
+	no "(LV1) the scripts of the live session and the install command are made executable (0755):$lv1modes"
+fi
+lv1ic="$lv1sk/usr/local/libexec/wtfbsd-installer/installer.conf"
+if grep -q '^PRODUCT_SLUG=examplebsd$' "$lv1ic" 2>/dev/null && grep -q '^PRODUCT_NAME=ExampleBSD$' "$lv1ic" &&
+	grep -q '^OS=dragonfly$' "$lv1ic" && grep -q '^DEFAULT_KEYMAP=us.iso$' "$lv1ic"; then
+	ok "(LV1) the configuration of the installer names the product and DragonFly"
+else
+	no "(LV1) the configuration of the installer names the product and DragonFly"
+	sed 's/^/      | /' "$lv1ic" 2>/dev/null
+fi
+if grep -Eq '^ttyv1[[:space:]].*getty Pc.*[[:space:]]on[[:space:]]' "$lv1/etc/ttys" 2>/dev/null &&
+	! grep -q '^ttyv1[[:space:]]' "$lv1/etc.hdd/ttys" 2>/dev/null; then
+	ok "(LV1) the build adds a getty on ttyv1 (the stock installer) to the live media, and leaves the ttys of the installed system alone"
+else
+	no "(LV1) the build adds a getty on ttyv1 (the stock installer) to the live media, and leaves the ttys of the installed system alone"
+	grep -n 'ttyv' "$lv1/etc/ttys" "$lv1/etc.hdd/ttys" 2>/dev/null | sed 's/^/      | /'
+fi
+if grep -qxF "INSTALL-INTO-STAGE $lv1sk" "$work/lv1/stub.log" 2>/dev/null &&
+	! grep -q 'live' "$lv1sk/usr/local/etc/doas.conf" 2>/dev/null; then
+	ok "(LV1) the build runs install-into-stage.sh of installer-template on the staged overlay; the shipped doas.conf has no rule for live"
+else
+	no "(LV1) the build runs install-into-stage.sh of installer-template on the staged overlay; the shipped doas.conf has no rule for live"
+fi
+# (LV16) what the real install-into-stage.sh of installer-template
+#        (ceda104) asks for: without root a METALOG (it refuses otherwise),
+#        and the artwork of the product as --artwork <the unpacked pack>
+lv16a=$(grep '^INSTALL-INTO-STAGE-ARGS ' "$work/lv1/stub.log" 2>/dev/null | head -n 1)
+lv16art=$(printf '%s\n' "$lv16a" | sed -n 's/.* --artwork \([^ ]*\).*/\1/p')
+if printf '%s\n' "$lv16a" | grep -q ' --metalog [^ ]*/installer\.metalog' &&
+	case $lv16art in */artwork-pack/examplebsd-*-default) true ;; *) false ;; esac &&
+	[ -f "$lv16art/palette.env" ]; then
+	ok "(LV16) the build hands install-into-stage.sh --metalog (built without root) and --artwork <the unpacked pack with its palette.env>"
+else
+	no "(LV16) the build hands install-into-stage.sh --metalog (built without root) and --artwork <the unpacked pack with its palette.env>"
+	printf '      | %s\n' "$lv16a"
+fi
+mkdir -p "$work/lv16b/bin"
+printf '#!/bin/sh\necho "python3: not found" >&2\nexit 127\n' > "$work/lv16b/bin/python3"
+chmod 755 "$work/lv16b/bin/python3"
+REAL_PATH_PREFIX="$work/lv16b/bin" REAL_PROFILE=desktop realbuild "$work/lv16b" -u ciuser -P "$work/pass.hash"
+lv16brc=$realrc
+if [ "$lv16brc" -ne 0 ] && grep -q 'no working python3: install-into-stage.sh of installer-template needs it' "$work/lv16b/build.log" 2>/dev/null &&
+	! grep -q '^INSTALL-INTO-STAGE ' "$work/lv16b/stub.log" 2>/dev/null; then
+	ok "(LV16) a build host without a working python3 stops before install-into-stage.sh gets the artwork, and says to install lang/python3"
+else
+	no "(LV16) a build host without a working python3 stops before install-into-stage.sh gets the artwork, and says to install lang/python3 (rc=$lv16brc)"
+	tail -n 3 "$work/lv16b/build.log" 2>/dev/null | sed 's/^/      | /'
+fi
+mkdir -p "$work/lv16/sk" "$work/lv16/noart"
+if [ "$(id -u)" != 0 ] &&
+	! sh "$repo/tests/fixtures/fake-installer-template/install-into-stage.sh" "$work/lv16/sk" > /dev/null 2>&1 &&
+	[ ! -e "$work/lv16/sk/usr/local/bin/wtfbsd-installer" ] &&
+	! sh "$repo/tests/fixtures/fake-installer-template/install-into-stage.sh" "$work/lv16/sk" --metalog "$work/lv16/m" --artwork "$work/lv16/noart" > /dev/null 2>&1 &&
+	sh "$repo/tests/fixtures/fake-installer-template/install-into-stage.sh" "$work/lv16/sk" --metalog "$work/lv16/m" > /dev/null 2>&1; then
+	ok "(LV16) the stand-in of install-into-stage.sh refuses, like the real one, to run without root and without --metalog, and an --artwork without palette.env"
+else
+	no "(LV16) the stand-in of install-into-stage.sh refuses, like the real one, to run without root and without --metalog, and an --artwork without palette.env"
+fi
+lv1pk=''
+for p in devel/py-pygobject x11-toolkits/gtk30 x11/xterm lang/python3; do
+	grep -q "^$p\$" "$repo/overlay/profiles/desktop/packages.list" 2>/dev/null || lv1pk="$lv1pk $p"
+done
+if [ -z "$lv1pk" ] && grep -q '^VAR DPORTS_EXTRA_PACKAGES=.*devel/py-pygobject' "$work/lv1/stub.log" 2>/dev/null; then
+	ok "(LV1) the desktop hands PyGObject, GTK 3, python3 and xterm to the release"
+else
+	no "(LV1) the desktop hands PyGObject, GTK 3, python3 and xterm to the release:$lv1pk"
+fi
+
+# (LV2) where the installer comes from: the pinned default for the desktop,
+#       INSTALLER_REF is a commit or tag (no .., no leading dash) and is
+#       cloned at it,
+#       INSTALLER_DIR must hold install-into-stage.sh; the appliance needs none
+env -u INSTALLER_DIR sh "$build" -n -c "$fixture" -p desktop --no-user -o "$lv/d1" > "$lv/d1.log" 2>&1
+r1=$?
+env -u INSTALLER_DIR INSTALLER_REF=v1..2 sh "$build" -n -c "$fixture" -p desktop --no-user -o "$lv/d2" > "$lv/d2.log" 2>&1
+r2=$?
+env -u INSTALLER_DIR INSTALLER_REF=4d9cd5b sh "$build" -n -c "$fixture" -p desktop --no-user -o "$lv/d3" > "$lv/d3.log" 2>&1
+r3=$?
+mkdir -p "$lv/notinst"
+INSTALLER_DIR="$lv/notinst" sh "$build" -n -c "$fixture" -p desktop --no-user -o "$lv/d4" > "$lv/d4.log" 2>&1
+r4=$?
+env -u INSTALLER_DIR sh "$build" -n -c "$fixture" -p appliance --no-user -o "$lv/d5" > "$lv/d5.log" 2>&1
+r5=$?
+if [ "$r1" -eq 0 ] && grep -q 'installer-template f2e9c48b051f473029ef44a78264b2239ff73141 from' "$lv/d1.log"; then
+	ok "(LV2) the desktop without INSTALLER_REF or INSTALLER_DIR takes the pinned main of installer-template"
+else
+	no "(LV2) the desktop without INSTALLER_REF or INSTALLER_DIR takes the pinned main of installer-template (rc=$r1)"
+fi
+if [ "$r2" -ne 0 ] && grep -q 'INSTALLER_REF may not contain \.\.' "$lv/d2.log"; then
+	ok "(LV2) an INSTALLER_REF that is not a plain commit or tag (..) is refused"
+else
+	no "(LV2) an INSTALLER_REF that is not a plain commit or tag (..) is refused (rc=$r2)"
+fi
+if [ "$r3" -eq 0 ] && grep -q 'git clone .*installer-template' "$lv/d3.log" &&
+	grep -q 'checkout --quiet 4d9cd5b$' "$lv/d3.log"; then
+	ok "(LV2) INSTALLER_REF is cloned and checked out at that commit"
+else
+	no "(LV2) INSTALLER_REF is cloned and checked out at that commit (rc=$r3)"
+	sed 's/^/      | /' "$lv/d3.log" | head -20
+fi
+if [ "$r4" -ne 0 ] && grep -q 'no install-into-stage.sh' "$lv/d4.log"; then
+	ok "(LV2) an INSTALLER_DIR without install-into-stage.sh is refused"
+else
+	no "(LV2) an INSTALLER_DIR without install-into-stage.sh is refused (rc=$r4)"
+fi
+if [ "$r5" -eq 0 ] && ! grep -q 'install-into-stage' "$lv/d5.log"; then
+	ok "(LV2) the appliance needs no installer of a live session"
+else
+	no "(LV2) the appliance needs no installer of a live session (rc=$r5)"
+fi
+
+# the stand-ins of the live session and of the install command
+cat > "$lv/bin/pw" <<'EOF'
+#!/bin/sh
+printf 'pw %s\n' "$*" >> "$LV_LOG"
+[ "${1:-}" = useradd ] || exit 0
+n='' u=''
+shift
+while [ $# -gt 0 ]; do
+	case $1 in -n) n=$2; shift ;; -u) u=$2; shift ;; esac
+	shift
+done
+printf '%s:*:%s:%s::0:0:Live user:/home/%s:/bin/sh\n' "$n" "$u" "$u" "$n" >> "$LV_ROOT/etc/master.passwd"
+printf '%s:*:%s:%s:Live user:/home/%s:/bin/sh\n' "$n" "$u" "$u" "$n" >> "$LV_ROOT/etc/passwd"
+printf '%s:*:%s:\n' "$n" "$u" >> "$LV_ROOT/etc/group"
+mkdir -p "$LV_ROOT/home/$n"
+EOF
+for t in chown logger pwd_mkdb; do
+	printf '#!/bin/sh\nprintf "%s %%s\\n" "$*" >> "$LV_LOG"\nexit 0\n' "$t" > "$lv/bin/$t"
+done
+chmod 755 "$lv/bin/"*
+mkdir -p "$lv/rcsubr"
+printf 'load_rc_config() { :; }\nrun_rc_command() { case ${1:-} in start) "$start_cmd" ;; esac; }\n' > "$lv/rcsubr/rc.subr"
+
+lvroot() { # lvroot <dir> <live|installed> — a root tree for the live session
+	rm -rf "$1"
+	mkdir -p "$1/etc/rc.d" "$1/home" "$1/usr/local/etc/lightdm/lightdm.conf.d" \
+		"$1/usr/local/share/examplebsd/live" "$1/usr/local/sbin" "$1/usr/local/bin" "$1/var/mail"
+	printf 'root:*:0:0::0:0:Charlie &:/root:/bin/sh\nalice:*:1100:1100::0:0:Alice:/home/alice:/bin/sh\n' > "$1/etc/master.passwd"
+	[ "$2" = live ] && printf 'installer::0:0::0:0:DragonFly Installer:/root:/usr/sbin/installer\n' >> "$1/etc/master.passwd"
+	printf 'root:*:0:0:Charlie &:/root:/bin/sh\nalice:*:1100:1100:Alice:/home/alice:/bin/sh\n' > "$1/etc/passwd"
+	printf 'wheel:*:0:root\nalice:*:1100:\n' > "$1/etc/group"
+	printf 'permit persist :wheel\n' > "$1/usr/local/etc/doas.conf"
+	sed -e 's/@SLUG@/examplebsd/g' "$dov/usr/local/share/@SLUG@/live/90-live-autologin.conf" \
+		> "$1/usr/local/share/examplebsd/live/90-live-autologin.conf"
+	sh "$repo/tests/fixtures/fake-installer-template/install-into-stage.sh" "$1" --metalog "$lv/metalog" > /dev/null
+	lvsub "$dov/usr/local/sbin/@SLUG@-live-clean" "$1/usr/local/sbin/examplebsd-live-clean"
+	sed -e "s#/etc/rc\\.subr#$lv/rcsubr/rc.subr#" -e 's/@SLUG@/examplebsd/g' -e 's/@DISTRO_NAME@/ExampleBSD/g' \
+		"$dov/etc/rc.d/live_session" > "$1/etc/rc.d/live_session"
+}
+lvrun() { # lvrun <root> — run the live session script on the root
+	: > "$lv/log"
+	PATH="$lv/bin:$PATH" LV_LOG="$lv/log" LV_ROOT="$1" live_session_root="$1" \
+		sh "$1/etc/rc.d/live_session" start > "$lv/run.log" 2>&1
+	lvrc=$?
+}
+
+# (LV18) the live medium (installer-template f2e9c48, README "The live
+#        medium"): the live media write /var/run/wtfbsd-live-medium early,
+#        one line, the device the root is mounted from, a regular file of
+#        mode 0644 renamed into place (a symbolic link there is replaced,
+#        not followed); the installed system writes none; a root that is
+#        not a device writes none and says so
+mkdir -p "$lv/mbin"
+printf '#!/bin/sh\n[ "$1" = -p ] && printf "%%s\\n" "$LV_MOUNT_P"\nexit 0\n' > "$lv/mbin/mount"
+chmod 755 "$lv/mbin/mount"
+lvmed() { # lvmed <root> <mount -p output> — run live_medium on the root
+	sed -e "s#/etc/rc\\.subr#$lv/rcsubr/rc.subr#" "$dov/etc/rc.d/live_medium" > "$1/etc/rc.d/live_medium"
+	PATH="$lv/mbin:$PATH" LV_MOUNT_P="$2" live_medium_root="$1" \
+		sh "$1/etc/rc.d/live_medium" start > "$lv/med.log" 2>&1
+	lvmrc=$?
+}
+lvroot "$lv/med-live" live
+mkdir -p "$lv/med-live/var/run"
+ln -s "$lv/med-target" "$lv/med-live/var/run/wtfbsd-live-medium"
+lvmed "$lv/med-live" "$(printf '/dev/part-by-label/examplebsd-live.a\t/\tufs\trw\t1\t1\ntmpfs\t/tmp\ttmpfs\trw\t0\t0')"
+lvmf="$lv/med-live/var/run/wtfbsd-live-medium"
+if [ "$lvmrc" -eq 0 ] && [ -f "$lvmf" ] && [ ! -L "$lvmf" ] && [ ! -e "$lv/med-target" ] &&
+	[ "$(cat "$lvmf")" = /dev/part-by-label/examplebsd-live.a ] && [ "$(wc -l < "$lvmf" | tr -d ' ')" = 1 ] &&
+	[ "$(ls -l "$lvmf" | cut -c1-10)" = '-rw-r--r--' ]; then
+	ok "(LV18) the live media write /var/run/wtfbsd-live-medium: one line, the device of the root, mode 0644, a link in its place replaced and not followed"
+else
+	no "(LV18) the live media write /var/run/wtfbsd-live-medium: one line, the device of the root, mode 0644, a link in its place replaced and not followed (rc=$lvmrc)"
+	ls -l "$lvmf" 2>&1 | sed 's/^/      | /'; sed 's/^/      | /' "$lv/med.log"
+fi
+lvroot "$lv/med-inst" installed
+lvmed "$lv/med-inst" "$(printf '/dev/part-by-label/examplebsd-a1b2c3d4.d\t/\thammer2\trw\t1\t1')"
+lvroot "$lv/med-odd" live
+lvmed "$lv/med-odd" "$(printf 'vbd0s1d@ROOT\t/\thammer2\trw\t1\t1')"
+lvmoddrc=$lvmrc
+if [ ! -e "$lv/med-inst/var/run/wtfbsd-live-medium" ] && [ "$lvmoddrc" -ne 0 ] &&
+	[ ! -e "$lv/med-odd/var/run/wtfbsd-live-medium" ] && grep -q 'is not a device' "$lv/med.log"; then
+	ok "(LV18) the installed system writes no live-medium file; a root that is not a /dev device writes none and says so"
+else
+	no "(LV18) the installed system writes no live-medium file; a root that is not a /dev device writes none and says so (rc=$lvmoddrc)"
+fi
+if grep -q '^# REQUIRE: mountcritlocal cleanvar$' "$dov/etc/rc.d/live_medium" &&
+	grep -q '^# BEFORE: live_session LOGIN$' "$dov/etc/rc.d/live_medium" &&
+	[ -f "$lv1sk/etc/rc.d/live_medium" ] && grep -qxF "CMD chmod 755 $lv1sk/etc/rc.d/live_medium" "$work/lv1/stub.log"; then
+	ok "(LV18) live_medium runs early (after cleanvar, before the live session and the login) and is staged executable"
+else
+	no "(LV18) live_medium runs early (after cleanvar, before the live session and the login) and is staged executable"
+fi
+
+# (LV3) the live media: the live user (the first free uid from 1100, not
+#       in wheel), the autostart of the installer, the automatic login,
+#       one doas rule: the root helper of the installer only
+L="$lv/live"
+lvroot "$L" live
+lvrun "$L"
+lvrun "$L"
+if [ "$lvrc" -eq 0 ] && grep -q '^pw useradd -n live -u 1101 ' "$lv/log" 2>/dev/null ||
+	grep -q '^live:\*:1101:' "$L/etc/passwd"; then
+	ok "(LV3) the live media get the live user, with the first free uid from 1100 up"
+else
+	no "(LV3) the live media get the live user, with the first free uid from 1100 up (rc=$lvrc)"
+	sed 's/^/      | /' "$lv/run.log" "$L/etc/passwd"
+fi
+if [ "$(grep -c '^live:' "$L/etc/passwd")" -eq 1 ]; then
+	ok "(LV3) a second boot creates no second live user"
+else
+	no "(LV3) a second boot creates no second live user"
+fi
+if cmp -s "$L/usr/local/share/wtfbsd-installer/autostart/wtfbsd-installer.desktop" "$L/home/live/.config/autostart/wtfbsd-installer.desktop"; then
+	ok "(LV3) the autostart entry of the installer is in the autostart directory of the live user (the installer opens first)"
+else
+	no "(LV3) the autostart entry of the installer is in the autostart directory of the live user (the installer opens first)"
+	find "$L/home" 2>/dev/null | sed 's/^/      | /'
+fi
+if grep -q '^autologin-user=live$' "$L/usr/local/etc/lightdm/lightdm.conf.d/90-live-autologin.conf" 2>/dev/null &&
+	grep -q '^autologin-session=xfce$' "$L/usr/local/etc/lightdm/lightdm.conf.d/90-live-autologin.conf"; then
+	ok "(LV3) LightDM logs the live user into Xfce by itself on the live media"
+else
+	no "(LV3) LightDM logs the live user into Xfce by itself on the live media"
+fi
+lvpermit=$(grep '^permit' "$L/usr/local/etc/doas.conf" | grep -c ' live ')
+if [ "$lvpermit" -eq 1 ] &&
+	grep -qx 'permit nopass live as root cmd /usr/local/libexec/wtfbsd-installer/installer-apply' "$L/usr/local/etc/doas.conf" &&
+	! grep -Eq 'keepenv|setenv' "$L/usr/local/etc/doas.conf" &&
+	grep -q '^permit persist :wheel$' "$L/usr/local/etc/doas.conf"; then
+	ok "(LV3) the doas.conf of the live media holds exactly one permit line for live: the root helper of the installer, no keepenv, no setenv"
+else
+	no "(LV3) the doas.conf of the live media holds exactly one permit line for live: the root helper of the installer, no keepenv, no setenv"
+	sed 's/^/      | /' "$L/usr/local/etc/doas.conf"
+fi
+if grep -q '^live:' "$L/etc/passwd" && ! grep -q -- '-G' "$lv/log" && ! grep -Eq '^wheel:.*[:,]live(,|$)' "$L/etc/group"; then
+	ok "(LV3) the live user is not in the wheel group"
+else
+	no "(LV3) the live user is not in the wheel group"
+fi
+
+# (LV4) the installed system (no installer account): no live user is
+#       created, and what a copy of the live root brought along is removed
+I="$lv/inst"
+lvroot "$I" installed
+cp "$L/usr/local/etc/lightdm/lightdm.conf.d/90-live-autologin.conf" "$I/usr/local/etc/lightdm/lightdm.conf.d/"
+cp "$L/usr/local/etc/doas.conf" "$I/usr/local/etc/doas.conf"
+lvrun "$I"
+if [ "$lvrc" -eq 0 ] && [ -s "$I/etc/rc.d/live_session" ] && ! grep -q '^pw useradd' "$lv/log" && ! grep -q '^live:' "$I/etc/passwd" &&
+	[ ! -e "$I/usr/local/etc/lightdm/lightdm.conf.d/90-live-autologin.conf" ] &&
+	! grep -q 'live' "$I/usr/local/etc/doas.conf" && grep -q '^permit persist :wheel$' "$I/usr/local/etc/doas.conf"; then
+	ok "(LV4) the installed system gets no live user, and a leftover automatic login and doas rule are removed"
+else
+	no "(LV4) the installed system gets no live user, and a leftover automatic login and doas rule are removed (rc=$lvrc)"
+	sed 's/^/      | /' "$lv/run.log" "$lv/log" "$I/usr/local/etc/doas.conf"
+fi
+
+# (LV5) the live clean-up on a copy of the live root: the live user (its
+#       lines, its group, its home, its mail), the automatic login, the
+#       doas rule, the menu and autostart entries are gone; the live
+#       media themselves are refused
+C="$lv/copy"
+rm -rf "$C"; cp -R "$L" "$C"
+awk '!/^installer:/' "$C/etc/master.passwd" > "$C/mp" && mv "$C/mp" "$C/etc/master.passwd"
+printf 'operator:*:5:root,live\n' >> "$C/etc/group"
+: > "$C/var/mail/live"
+mkdir -p "$C/usr/local/etc/xdg/autostart"; : > "$C/usr/local/etc/xdg/autostart/wtfbsd-installer.desktop"
+PATH="$lv/bin:$PATH" LV_LOG="$lv/log" sh "$C/usr/local/sbin/examplebsd-live-clean" "$C" > "$lv/clean.log" 2>&1
+crc=$?
+if [ "$crc" -eq 0 ] && ! grep -q '^live:' "$C/etc/master.passwd" "$C/etc/passwd" "$C/etc/group" &&
+	grep -q '^operator:\*:5:root$' "$C/etc/group" && grep -q '^alice:' "$C/etc/passwd" &&
+	[ ! -e "$C/home/live" ] && [ ! -e "$C/var/mail/live" ] &&
+	[ ! -e "$C/usr/local/etc/lightdm/lightdm.conf.d/90-live-autologin.conf" ] &&
+	! grep -q 'live' "$C/usr/local/etc/doas.conf" &&
+	[ ! -e "$C/usr/local/share/applications/wtfbsd-installer.desktop" ] &&
+	[ ! -e "$C/usr/local/etc/xdg/autostart/wtfbsd-installer.desktop" ] &&
+	[ ! -e "$C/usr/local/bin/wtfbsd-installer" ] && [ ! -e "$C/usr/local/libexec/wtfbsd-installer" ] &&
+	[ ! -e "$C/usr/local/share/wtfbsd-installer" ] && [ -d "$C/usr/local/bin" ]; then
+	ok "(LV5) the live clean-up leaves no live user, no automatic login, no doas rule and no installer entry; every path of the MANIFEST is gone"
+else
+	no "(LV5) the live clean-up leaves no live user, no automatic login, no doas rule and no installer entry; every path of the MANIFEST is gone (rc=$crc)"
+	sed 's/^/      | /' "$lv/clean.log" "$C/etc/group" "$C/usr/local/etc/doas.conf"
+fi
+PATH="$lv/bin:$PATH" LV_LOG="$lv/log" sh "$L/usr/local/sbin/examplebsd-live-clean" "$L" > "$lv/clean2.log" 2>&1
+crc=$?
+if [ "$crc" -ne 0 ] && [ -e "$L/usr/local/etc/lightdm/lightdm.conf.d/90-live-autologin.conf" ] && grep -q '^live:' "$L/etc/passwd"; then
+	ok "(LV5) the live clean-up refuses the live media themselves"
+else
+	no "(LV5) the live clean-up refuses the live media themselves (rc=$crc)"
+fi
+if grep -q 'exec /usr/local/sbin/@SLUG@-live-clean /mnt' "$dov/usr/local/bin/after_installation_routines.sh" 2>/dev/null; then
+	ok "(LV5) the stock installer runs the live clean-up on the disk it installed (/mnt)"
+else
+	no "(LV5) the stock installer runs the live clean-up on the disk it installed (/mnt)"
+fi
+
+# (LV6) the install command, through stand-ins for the disk tools: the
+#       live root (with the live session of LV3) is copied the way the
+#       stock installer copies it (X.hdd for X), the live session is
+#       removed from the copy, the first boot gets the answers
+ib="$lv/ibin"
+mkdir -p "$ib"
+for t in dd newfs newfs_msdos newfs_hammer2 mount_msdos mount_hammer2 mount_null umount mtree pwd_mkdb chown; do
+	printf '#!/bin/sh\nprintf "%s %%s\\n" "$*" >> "$INST_LOG"\nexit 0\n' "$t" > "$ib/$t"
+done
+cat > "$ib/gpt" <<'EOF'
+#!/bin/sh
+printf 'gpt %s\n' "$*" >> "$INST_LOG"
+if [ "$1" = show ]; then
+	printf '     start      size  index  contents\n         0         1      -  PMBR\n      2048    262144      0  GPT part - EFI System\n    264192  83619840      1  GPT part - DragonFly Label64\n'
+fi
+exit 0
+EOF
+cat > "$ib/disklabel64" <<'EOF'
+#!/bin/sh
+printf 'disklabel64 %s\n' "$*" >> "$INST_LOG"
+if [ "$1" = -r ] && [ $# -eq 2 ]; then
+	printf '# /dev/%s:\ntype: unknown\ndisk: vbd0s1\n\n16 partitions:\n#          size     offset    fstype\n' "$2"
+fi
+case $* in *-R*)
+	for a; do :; done
+	cat "$a" >> "$INST_LOG.label"
+	# devfs names the partitions of a label with a name by that name
+	l=$(sed -n 's/^label: //p' "$a" | tail -n 1)
+	if [ -n "$l" ] && [ "${LV_NO_LABEL_NODES:-0}" != 1 ]; then
+		mkdir -p "$INSTALL_DEV/part-by-label"
+		for p in a b d; do : > "$INSTALL_DEV/part-by-label/$l.$p"; done
+	fi
+	;;
+esac
+exit 0
+EOF
+cat > "$ib/mount" <<'EOF'
+#!/bin/sh
+printf 'mount %s\n' "$*" >> "$INST_LOG"
+[ "$1" = -p ] && cat "$MOUNTS_P"
+exit 0
+EOF
+cat > "$ib/swapctl" <<'EOF'
+#!/bin/sh
+printf 'Device      1K-blocks     Used    Avail Capacity  Priority\n'
+EOF
+cat > "$ib/sysctl" <<'EOF'
+#!/bin/sh
+case $2 in
+kern.disks) printf '%s\n' "$KERN_DISKS" ;;
+hw.physmem) printf '8589934592\n' ;;
+*) exit 1 ;;
+esac
+EOF
+cat > "$ib/stat" <<'EOF'
+#!/bin/sh
+# stat -L -f %r PATH: the device number from the map of the case
+[ "$1" = -L ] && [ "$2" = -f ] && [ "$3" = %r ] || exit 2
+awk -v p="$4" '$1 == p { print $2; f = 1 } END { exit !f }' "$RDEV_MAP"
+EOF
+cat > "$ib/ifconfig" <<'EOF'
+#!/bin/sh
+[ "$1" = -l ] && printf 'vtnet0 lo0 wlan0 em1\n'
+exit 0
+EOF
+cat > "$ib/cpdup" <<'EOF'
+#!/bin/sh
+printf 'cpdup %s\n' "$*" >> "$INST_LOG"
+[ "$1" = -o ] && shift
+if [ -d "$1" ]; then mkdir -p "$2" && cp -R "$1/." "$2/"; else cp "$1" "$2"; fi
+EOF
+chmod 755 "$ib/"*
+lvsub "$dov/usr/local/sbin/@SLUG@-install" "$lv/examplebsd-install"
+
+S="$lv/src"
+rm -rf "$S"; cp -R "$L" "$S"
+mkdir -p "$S/etc.hdd" "$S/boot/kernel" "$S/usr/share/installer" "$S/usr/share/zoneinfo/Europe" \
+	"$S/usr/share/syscons/keymaps" "$S/var/log" "$S/root" "$S/bin"
+printf 'root:*:0:0::0:0:Charlie &:/root:/bin/sh\n' > "$S/etc.hdd/master.passwd"
+printf 'root:*:0:0:Charlie &:/root:/bin/sh\n' > "$S/etc.hdd/passwd"
+printf 'wheel:*:0:root\n' > "$S/etc.hdd/group"
+printf 'lightdm_enable="YES"\n' > "$S/etc.hdd/rc.conf"
+printf 'kernel_options="-C"\nconsole="comconsole"\n' > "$S/boot/loader.conf"
+printf 'efi\n' > "$S/boot/boot1.efi"; printf 'kernel\n' > "$S/boot/kernel/kernel"; printf 'loader\n' > "$S/boot/loader.efi"
+printf 'USERNAME=builduser\n' > "$S/boot/firstboot-user.conf"
+printf '/COPYRIGHT\n/bin\n/boot\n/etc\n/root\n/tmp\n/usr/local\n/usr/local/etc\n/usr/share\n/var\n' > "$S/usr/share/installer/sources.conf"
+: > "$S/usr/share/zoneinfo/Europe/Berlin"; : > "$S/usr/share/syscons/keymaps/de.iso.kbd"
+mkdir -p "$S/tmp"; : > "$S/tmp/live-junk"
+mkdir -p "$S/usr/local/etc/xdg/autostart"; : > "$S/usr/local/etc/xdg/autostart/wtfbsd-installer.desktop"
+mkdir -p "$lv/dev"
+for d in vbd0 vbd0s0 vbd0s1 vbd0s1a vbd0s1b vbd0s1d vbd1 vbd1s1 vbd1s2 vbd1s2a; do : > "$lv/dev/$d"; done
+mkdir -p "$lv/dev/part-by-label"; : > "$lv/dev/part-by-label/DragonFly_v6.4.2.a"
+printf '%s 1\n%s 2\n%s 3\n%s 4\n%s 5\n%s 6\n%s 7\n%s 8\n%s 9\n%s 9\n' \
+	"$lv/dev/vbd0" "$lv/dev/vbd0s0" "$lv/dev/vbd0s1" "$lv/dev/vbd0s1a" "$lv/dev/vbd0s1b" "$lv/dev/vbd0s1d" \
+	"$lv/dev/vbd1" "$lv/dev/vbd1s1" "$lv/dev/vbd1s2a" "$lv/dev/part-by-label/DragonFly_v6.4.2.a" > "$lv/rdev"
+printf '/dev/part-by-label/DragonFly_v6.4.2.a\t/\tufs rw\t1 1\ndevfs\t/dev\tdevfs rw\t0 0\ntmpfs\t/tmp\ttmpfs rw\t0 0\n' > "$lv/mounts"
+umask 077; printf '%s\n' '$6$saltsalt$NotARealHashButShapedLikeOne0123456789' > "$lv/hash"; umask 022
+printf '%s %s %s\n' 'ssh-ed25519' 'AAAAtest' 'k@h' > "$lv/key"
+
+lvinst() { # lvinst <args...> — run the install command; sets irc, $lv/i.out, $lv/i.err
+	rm -rf "$lv/mnt"
+	: > "$lv/inst.log"; rm -f "$lv/inst.log.label"
+	PATH="$ib:$PATH" INST_LOG="$lv/inst.log" MOUNTS_P="$lv/mounts" RDEV_MAP="$lv/rdev" \
+	KERN_DISKS="${LV_DISKS:-vbd1 vbd0}" INSTALL_SRC="$S" INSTALL_DEV="$lv/dev" INSTALL_MNT="$lv/mnt" \
+	INSTALL_TEST_ALLOW_NONROOT=1 TMPDIR="$lv" \
+		sh "$lv/examplebsd-install" "$@" > "$lv/i.out" 2> "$lv/i.err"
+	irc=$?
+}
+# a netmask, assembled so that the tree holds no dotted quad outside the
+# documentation ranges
+lvmask=$(printf '%s.%s.%s.%s' 255 255 255 0)
+lvinst -d vbd0 -u wtfuser -k "$lv/key" -H "$lv/hash" -n box.example.org -z Europe/Berlin -K de.iso \
+	-c 'Wtf User' -P -N "vtnet0:192.0.2.10/$lvmask:192.0.2.1" -N em1:dhcp -y --progress
+M="$lv/mnt"
+if [ "$irc" -eq 0 ] && [ "$(tail -1 "$lv/i.out")" = 'PROGRESS 100 ExampleBSD is installed on vbd0' ] &&
+	! grep -qv '^PROGRESS [0-9][0-9]* ' "$lv/i.out"; then
+	ok "(LV6) the install command exits 0 and prints PROGRESS lines only, up to 100"
+else
+	no "(LV6) the install command exits 0 and prints PROGRESS lines only, up to 100 (rc=$irc)"
+	sed 's/^/      | /' "$lv/i.out" "$lv/i.err" | tail -20
+fi
+if grep -q '^gpt add -i 0 -s 262144 -t efi vbd0$' "$lv/inst.log" && grep -q '^gpt add -i 1 -t dragonfly vbd0$' "$lv/inst.log" &&
+	grep -q "^newfs_hammer2 $lv/dev/vbd0s1d\$" "$lv/inst.log" && grep -q "^newfs -i 65536 $lv/dev/vbd0s1a\$" "$lv/inst.log" &&
+	grep -Eq '^  a:	1024M	0	4.2BSD$' "$lv/inst.log.label" 2>/dev/null &&
+	grep -Eq '^  d:	\*	\*	HAMMER2$' "$lv/inst.log.label" && grep -Eq '^  b:	[0-9]+M	\*	swap$' "$lv/inst.log.label" &&
+	[ "$(cat "$M/EFI/BOOT/BOOTX64.EFI" 2>/dev/null)" = efi ]; then
+	ok "(LV6) the disk gets the layout of the stock installer: EFI, /boot UFS, swap, / HAMMER2, and the EFI loader"
+else
+	no "(LV6) the disk gets the layout of the stock installer: EFI, /boot UFS, swap, / HAMMER2, and the EFI loader"
+	sed 's/^/      | /' "$lv/inst.log" "$lv/inst.log.label" 2>/dev/null | head -40
+fi
+lvlab=$(sed -n 's/^label: //p' "$lv/inst.log.label" 2>/dev/null | tail -n 1)
+if printf '%s\n' "$lvlab" | grep -Eq '^examplebsd-[0-9a-f]{8}$' &&
+	grep -qx "vfs.root.mountfrom=\"hammer2:part-by-label/$lvlab.d\"" "$M/boot/loader.conf" 2>/dev/null && [ "$(grep -c . "$M/boot/loader.conf")" -eq 1 ] &&
+	grep -Eq "^/dev/part-by-label/$lvlab.d[[:space:]]+/[[:space:]]+hammer2" "$M/etc/fstab" &&
+	grep -Eq "^/dev/part-by-label/$lvlab.a[[:space:]]+/boot[[:space:]]+ufs" "$M/etc/fstab" &&
+	grep -Eq "^/dev/part-by-label/$lvlab.b[[:space:]]+none[[:space:]]+swap" "$M/etc/fstab" &&
+	grep -qx "dumpdev=\"/dev/part-by-label/$lvlab.b\"" "$M/etc/rc.conf" &&
+	! grep -q 'vbd0' "$M/etc/fstab" "$M/boot/loader.conf" &&
+	grep -Eq '^/build/var.log[[:space:]]+/var/log[[:space:]]+null' "$M/etc/fstab" &&
+	[ "$(cat "$M/boot/kernel/kernel")" = kernel ]; then
+	ok "(LV6) the installed system boots its own root by the name of its label (part-by-label/<slug>-<8 hex>), never by vbd0: loader.conf, fstab, dumpdev and the /build null mounts"
+else
+	no "(LV6) the installed system boots its own root by the name of its label (part-by-label/<slug>-<8 hex>), never by vbd0: loader.conf, fstab, dumpdev and the /build null mounts (label: $lvlab)"
+	sed 's/^/      | /' "$M/boot/loader.conf" "$M/etc/fstab" 2>/dev/null
+fi
+if ! grep -q '^installer:' "$M/etc/master.passwd" 2>/dev/null && grep -q '^root:' "$M/etc/master.passwd" &&
+	! grep -q '^live:' "$M/etc/master.passwd" "$M/etc/passwd" "$M/etc/group" &&
+	[ ! -e "$M/home/live" ] && [ -d "$M/home" ] &&
+	[ ! -e "$M/usr/local/etc/lightdm/lightdm.conf.d/90-live-autologin.conf" ] &&
+	! grep -q 'live' "$M/usr/local/etc/doas.conf" &&
+	[ ! -e "$M/usr/local/etc/xdg/autostart/wtfbsd-installer.desktop" ] &&
+	[ ! -e "$M/usr/local/share/applications/wtfbsd-installer.desktop" ] &&
+	[ ! -e "$M/tmp/live-junk" ]; then
+	ok "(LV6) the installed system has no live user, no automatic login and no installer that opens by itself"
+else
+	no "(LV6) the installed system has no live user, no automatic login and no installer that opens by itself"
+	ls -R "$M/home" "$M/usr/local/etc" 2>/dev/null | sed 's/^/      | /' | head -20
+fi
+fbm=$(ls -ln "$M/boot/firstboot-user.conf" 2>/dev/null | awk '{ print $1 }')
+if [ "$fbm" = '-rw-------' ] && grep -q '^USERNAME=wtfuser$' "$M/boot/firstboot-user.conf" &&
+	grep -qF 'PASSWORD_HASH=$6$saltsalt$' "$M/boot/firstboot-user.conf" &&
+	grep -qxF "SSH_KEY=$(cat "$lv/key")" "$M/boot/firstboot-user.conf" &&
+	grep -q '^HOSTNAME=box.example.org$' "$M/boot/firstboot-user.conf" &&
+	grep -q '^TIMEZONE=Europe/Berlin$' "$M/boot/firstboot-user.conf" &&
+	grep -q '^KEYMAP=de.iso$' "$M/boot/firstboot-user.conf" && ! grep -q builduser "$M/boot/firstboot-user.conf" &&
+	grep -q '^FULLNAME=Wtf User$' "$M/boot/firstboot-user.conf" && grep -q '^DOAS_NOPASS=yes$' "$M/boot/firstboot-user.conf"; then
+	ok "(LV6) the first-boot configuration (0600) holds the account, the hash, the key, the host name, the time zone, the keymap, the full name and -P"
+else
+	no "(LV6) the first-boot configuration (0600) holds the account, the hash, the key, the host name, the time zone, the keymap, the full name and -P (mode $fbm)"
+fi
+if grep -qx "ifconfig_vtnet0=\"inet 192.0.2.10 netmask $lvmask\"" "$M/etc/rc.conf" 2>/dev/null &&
+	grep -qx 'defaultrouter="192.0.2.1"' "$M/etc/rc.conf" && grep -qx 'ifconfig_em1="DHCP"' "$M/etc/rc.conf" &&
+	! grep -q 'wlan0\|lo0' "$M/etc/rc.conf"; then
+	ok "(LV6) -N writes the static address, the gateway and DHCP of the adapters into rc.conf"
+else
+	no "(LV6) -N writes the static address, the gateway and DHCP of the adapters into rc.conf"
+	sed 's/^/      | /' "$M/etc/rc.conf" 2>/dev/null
+fi
+if grep -q 'Option "XkbLayout" "de"' "$M/usr/local/etc/X11/xorg.conf.d/00-keyboard.conf" 2>/dev/null &&
+	grep -q 'MatchIsKeyboard "on"' "$M/usr/local/etc/X11/xorg.conf.d/00-keyboard.conf"; then
+	ok "(LV6) -K de.iso gives X the layout de (xorg.conf.d keyboard section)"
+else
+	no "(LV6) -K de.iso gives X the layout de (xorg.conf.d keyboard section)"
+fi
+if [ "$irc" -eq 0 ] && [ -d "$M/usr/local/bin" ] && [ ! -e "$M/usr/local/bin/wtfbsd-installer" ] && [ ! -e "$M/usr/local/libexec/wtfbsd-installer" ] &&
+	[ ! -e "$M/usr/local/share/wtfbsd-installer" ]; then
+	ok "(LV6) every path of the MANIFEST of the installer is removed from the installed system"
+else
+	no "(LV6) every path of the MANIFEST of the installer is removed from the installed system"
+fi
+if [ "$irc" -eq 0 ] && grep -qF 'PASSWORD_HASH=' "$M/boot/firstboot-user.conf" && ! grep -rqF 'NotARealHash' "$lv/i.out" "$lv/i.err" "$lv/inst.log" "$M/var/log" 2>/dev/null; then
+	ok "(LV6) the hash never reaches the output or the log"
+else
+	no "(LV6) the hash never reaches the output or the log"
+fi
+lvumount=$(grep -c '^umount ' "$lv/inst.log")
+lvinst -d vbd0 -u wtfuser -H "$lv/hash" -y --progress
+if [ "$irc" -eq 0 ] && grep -qx 'ifconfig_vtnet0="DHCP"' "$lv/mnt/etc/rc.conf" && grep -qx 'ifconfig_em1="DHCP"' "$lv/mnt/etc/rc.conf" &&
+	! grep -q 'wlan0\|lo0\|defaultrouter' "$lv/mnt/etc/rc.conf"; then
+	ok "(LV6) without -N every wired adapter asks DHCP"
+else
+	no "(LV6) without -N every wired adapter asks DHCP (rc=$irc)"
+	sed 's/^/      | /' "$lv/mnt/etc/rc.conf" "$lv/i.out" 2>/dev/null | tail -8
+fi
+if [ "$lvumount" -ge 9 ] && grep -q '^disklabel64 -B vbd0s1$' "$lv/inst.log"; then
+	ok "(LV6) everything that was mounted is unmounted, and the label is made bootable"
+else
+	no "(LV6) everything that was mounted is unmounted, and the label is made bootable ($lvumount umounts)"
+fi
+
+# (LV13) the disk keeps its name across renumbering: every install gives
+#        the label a name of its own, and an install whose label names do
+#        not appear in devfs stops before anything is copied
+lvinst -d vbd0 -u wtfuser -H "$lv/hash" -y --progress
+lvl1=$(sed -n 's/^label: //p' "$lv/inst.log.label" | tail -n 1)
+lvinst -d vbd0 -u wtfuser -H "$lv/hash" -y --progress
+lvl2=$(sed -n 's/^label: //p' "$lv/inst.log.label" | tail -n 1)
+if [ -n "$lvl1" ] && [ -n "$lvl2" ] && [ "$lvl1" != "$lvl2" ] &&
+	[ "$(grep -c '^label:' "$lv/inst.log.label")" -eq 1 ]; then
+	ok "(LV13) two installs give their labels different names, and the label has exactly one name line"
+else
+	no "(LV13) two installs give their labels different names, and the label has exactly one name line ($lvl1 / $lvl2)"
+fi
+printf 'lightdm_enable="YES"\ndumpdev="/dev/vbd9s1b"\n' > "$S/etc.hdd/rc.conf"
+lvinst -d vbd0 -u wtfuser -H "$lv/hash" -y --progress
+lvl3=$(sed -n 's/^label: //p' "$lv/inst.log.label" | tail -n 1)
+if [ "$irc" -eq 0 ] && [ "$(grep -c '^dumpdev=' "$lv/mnt/etc/rc.conf")" -eq 1 ] &&
+	grep -qx "dumpdev=\"/dev/part-by-label/$lvl3.b\"" "$lv/mnt/etc/rc.conf"; then
+	ok "(LV13) a dumpdev the copy brought along is replaced by the swap of the new disk, by its label"
+else
+	no "(LV13) a dumpdev the copy brought along is replaced by the swap of the new disk, by its label (rc=$irc)"
+	grep -n dumpdev "$lv/mnt/etc/rc.conf" 2>/dev/null | sed 's/^/      | /'
+fi
+printf 'lightdm_enable="YES"\n' > "$S/etc.hdd/rc.conf"
+rm -f "$lv/dev/part-by-label"/examplebsd-*
+LV_NO_LABEL_NODES=1 lvinst -d vbd0 -u wtfuser -H "$lv/hash" -y --progress
+if [ "$irc" -ne 0 ] && grep -q '^ERROR the partitions of vbd0s1 did not appear as .*part-by-label/examplebsd-' "$lv/i.out" &&
+	! grep -q '^cpdup ' "$lv/inst.log"; then
+	ok "(LV13) an install whose part-by-label names do not appear stops before anything is copied"
+else
+	no "(LV13) an install whose part-by-label names do not appear stops before anything is copied (rc=$irc)"
+	tail -n 3 "$lv/i.out" | sed 's/^/      | /'
+fi
+
+# (LV7) the refusals: the disk of the running system (by name and by the
+#       alias part-by-label), no -y, a hash file others can read, a plain
+#       password, an unknown time zone, a disk the machine does not have;
+#       nothing is written, and the ERROR line says why
+lvrefuse() { # lvrefuse <what> <pattern> <args...>
+	_w=$1 _p=$2
+	shift 2
+	lvinst "$@"
+	if [ "$irc" -ne 0 ] && grep -q "^ERROR .*$_p" "$lv/i.out" && ! grep -q '^gpt \|^dd ' "$lv/inst.log"; then
+		ok "(LV7) $_w is refused before anything is written"
+	else
+		no "(LV7) $_w is refused before anything is written (rc=$irc)"
+		sed 's/^/      | /' "$lv/i.out" "$lv/i.err" | tail -5
+	fi
+}
+lvrefuse 'the disk of the live media (mounted through part-by-label)' 'vbd1 is in use' -d vbd1 -u wtfuser -H "$lv/hash" -y --progress
+printf 'vbd1s2a\t/\tufs rw\t1 1\n' > "$lv/mounts2"; cp "$lv/mounts" "$lv/mounts.keep"; cp "$lv/mounts2" "$lv/mounts"
+lvrefuse 'the disk of the live media (mounted by its name)' 'vbd1 is in use' -d vbd1 -u wtfuser -H "$lv/hash" -y --progress
+cp "$lv/mounts.keep" "$lv/mounts"
+lvrefuse 'an install without -y' '-y is required' -d vbd0 -u wtfuser -H "$lv/hash" --progress
+chmod 644 "$lv/hash"
+lvrefuse 'a hash file that others can read' 'mode 0600' -d vbd0 -u wtfuser -H "$lv/hash" -y --progress
+chmod 600 "$lv/hash"
+umask 077; printf 'secretpassword\n' > "$lv/plain"; umask 022
+lvrefuse 'a plain password in the hash file' 'crypt(3) hash' -d vbd0 -u wtfuser -H "$lv/plain" -y --progress
+lvrefuse 'an unknown time zone' 'no such time zone' -d vbd0 -u wtfuser -H "$lv/hash" -z Mars/Base -y --progress
+lvrefuse 'a disk the machine does not have' 'not a disk of this machine' -d vbd7 -u wtfuser -H "$lv/hash" -y --progress
+lvrefuse 'the name of the live user' 'reserved for the live media' -d vbd0 -u live -H "$lv/hash" -y --progress
+lvrefuse 'a disk given as a path' 'whole disk' -d /dev/vbd0 -u wtfuser -H "$lv/hash" -y --progress
+lvrefuse 'a -N that is neither dhcp nor an address' 'IF:dhcp or IF:ADDR' -d vbd0 -u wtfuser -H "$lv/hash" -N vtnet0:auto -y --progress
+lvrefuse 'an account of the system itself' 'an account of the system itself' -d vbd0 -u root -H "$lv/hash" -y --progress
+
+# (LV10) the parity flags of the install command: the disk plan (-p), the
+#        filesystem, dm_crypt (LUKS) with a passphrase file, the swap, the
+#        secure wipe, the locale, the hardware clock, the root password,
+#        the automatic login, IPv6, the resolvers, Wi-Fi and the update
+for t in cryptsetup cap_mkdb pkg; do
+	printf '#!/bin/sh\nprintf "%s %%s\\n" "$*" >> "$INST_LOG"\nexit 0\n' "$t" > "$ib/$t"
+done
+chmod 755 "$ib/"*
+mkdir -p "$S/usr/share/locale/fr_FR.UTF-8" "$lv/dev/mapper"
+: > "$lv/dev/mapper/root"
+printf 'initrd\n' > "$S/boot/kernel/initrd.img.gz"
+printf 'default:\\\n\t:passwd_format=sha512:\\\n\t:umask=022:\n' > "$S/etc.hdd/login.conf"
+lvsec() { # lvsec <file> <content> — a file of mode 0600
+	(umask 077; printf '%s' "$2" > "$1")
+	chmod 600 "$1"
+}
+lvsec "$lv/plan-a" '{"version":1,"mode":"erase","boot":"uefi","disks":["vbd0"],"layout":"single","filesystem":"hammer2","encryption":{"enabled":false},"swap_mb":0,"wipe":{"vbd0":"secure"}}'
+lvinst -p "$lv/plan-a" -u wtfuser -H "$lv/hash" -y --progress
+if [ "$irc" -eq 0 ] && ! grep -q '^  b:' "$lv/inst.log.label" 2>/dev/null && grep -Eq '^  d:	\*	\*	HAMMER2$' "$lv/inst.log.label" &&
+	grep -q "^dd if=/dev/zero of=$lv/dev/vbd0 bs=1m\$" "$lv/inst.log" && ! grep -q swap "$lv/mnt/etc/fstab"; then
+	ok "(LV10) a plan with swap_mb 0 and wipe secure: no swap, the whole disk overwritten, HAMMER2 root"
+else
+	no "(LV10) a plan with swap_mb 0 and wipe secure: no swap, the whole disk overwritten, HAMMER2 root (rc=$irc)"
+	sed 's/^/      | /' "$lv/i.out" "$lv/inst.log.label" 2>/dev/null | tail -12
+fi
+
+lvsec "$lv/plan-e" '{"version":1,"mode":"erase","boot":"uefi","disks":["vbd0"],"layout":"single","filesystem":"ufs","encryption":{"enabled":true,"swap":true},"swap_mb":2048,"wipe":{"vbd0":"quick"},"sector_4k":true,"trim":true}'
+lvsec "$lv/pass" 'correct horse battery staple
+'
+lvsec "$lv/roothash" '$6$rootsalt$RootHashShapedOnly0123456789
+'
+lvsec "$lv/wifi" '{"if":"iwn0","ssid":"Example Net","security":"wpa2","psk":"wifi-secret-words"}'
+lvgw6=2001:db8::1
+lvaddr6=2001:db8::10
+lvinst -p "$lv/plan-e" -E "$lv/pass" -u wtfuser -H "$lv/hash" -L fr_FR.UTF-8 -Z local -A -r "$lv/roothash" \
+	-6 "vtnet0:$lvaddr6/64:$lvgw6" -6 em1:slaac -D 192.0.2.53 -D 2001:db8::53 -W "$lv/wifi" -U -y --progress
+M="$lv/mnt"
+if [ "$irc" -eq 0 ] && grep -q "^cryptsetup -q luksFormat -d .* $lv/dev/vbd0s1d\$" "$lv/inst.log" &&
+	grep -q "^cryptsetup luksOpen -d .* $lv/dev/vbd0s1d root\$" "$lv/inst.log" &&
+	grep -q "^newfs -U $lv/dev/mapper/root\$" "$lv/inst.log" && grep -q '^cryptsetup luksClose root$' "$lv/inst.log" &&
+	grep -Eq '^  d:	\*	\*	4.2BSD$' "$lv/inst.log.label" && grep -Eq '^  b:	2048M	\*	swap$' "$lv/inst.log.label"; then
+	ok "(LV10) an encrypted UFS plan: LUKS on the root partition, the file system on the mapper, closed at the end"
+else
+	no "(LV10) an encrypted UFS plan: LUKS on the root partition, the file system on the mapper, closed at the end (rc=$irc)"
+	sed 's/^/      | /' "$lv/i.out" "$lv/i.err" | tail -8
+fi
+if grep -qx 'vfs.root.mountfrom="ufs:md0s0"' "$M/boot/loader.conf" 2>/dev/null &&
+	lvlab=$(sed -n 's/^label: //p' "$lv/inst.log.label" | tail -n 1) &&
+	grep -qx "vfs.root.realroot=\"crypt:ufs:part-by-label/$lvlab.d:root\"" "$M/boot/loader.conf" &&
+	grep -qx 'initrd.img_load="YES"' "$M/boot/loader.conf" && grep -qx 'dm_target_crypt_load="yes"' "$M/boot/loader.conf" &&
+	grep -Eq "^swap	/dev/part-by-label/$lvlab.b	none	none\$" "$M/etc/crypttab" 2>/dev/null &&
+	grep -Eq '^/dev/mapper/root[[:space:]]+/[[:space:]]+ufs' "$M/etc/fstab" && grep -Eq '^/dev/mapper/swap[[:space:]]+none[[:space:]]+swap' "$M/etc/fstab"; then
+	ok "(LV10) the encrypted root boots through the initrd (realroot crypt:ufs:part-by-label/...), the swap through crypttab by label"
+else
+	no "(LV10) the encrypted root boots through the initrd (realroot crypt:ufs), the swap through crypttab"
+	sed 's/^/      | /' "$M/boot/loader.conf" "$M/etc/fstab" "$M/etc/crypttab" 2>/dev/null
+fi
+if [ "$irc" -eq 0 ] && grep -q '^cryptsetup -q luksFormat' "$lv/inst.log" && ! grep -rqF 'horse battery' "$lv/i.out" "$lv/i.err" "$lv/inst.log" "$M" 2>/dev/null &&
+	! ls -d "$lv"/examplebsd-install.key.* > /dev/null 2>&1; then
+	ok "(LV10) the passphrase is in no output, no log and no file of the installed system, and its copy is removed"
+else
+	no "(LV10) the passphrase is in no output, no log and no file of the installed system, and its copy is removed"
+fi
+if grep -q ':lang=fr_FR.UTF-8:' "$M/etc/login.conf" 2>/dev/null && grep -q "^cap_mkdb $M/etc/login.conf\$" "$lv/inst.log" &&
+	[ -f "$M/etc/wall_cmos_clock" ] &&
+	grep -qx 'autologin-user=wtfuser' "$M/usr/local/etc/lightdm/lightdm.conf.d/80-autologin.conf" 2>/dev/null &&
+	grep -qF 'ROOT_PASSWORD_HASH=$6$rootsalt$' "$M/boot/firstboot-user.conf"; then
+	ok "(LV10) -L sets the locale of login.conf, -Z local the local clock, -A the login of the user, -r the root password"
+else
+	no "(LV10) -L sets the locale of login.conf, -Z local the local clock, -A the login of the user, -r the root password"
+fi
+if grep -qx 'ifconfig_vtnet0_ipv6="inet6 2001:db8::10 prefixlen 64"' "$M/etc/rc.conf" 2>/dev/null &&
+	grep -qx 'ipv6_defaultrouter="2001:db8::1"' "$M/etc/rc.conf" && grep -qx 'ifconfig_em1_ipv6="inet6 accept_rtadv"' "$M/etc/rc.conf" &&
+	grep -qx 'nameserver 192.0.2.53' "$M/etc/resolv.conf" && grep -qx 'nameserver 2001:db8::53' "$M/etc/resolv.conf"; then
+	ok "(LV10) -6 writes the static and the SLAAC adapters, -D the resolvers"
+else
+	no "(LV10) -6 writes the static and the SLAAC adapters, -D the resolvers"
+	sed 's/^/      | /' "$M/etc/rc.conf" "$M/etc/resolv.conf" 2>/dev/null
+fi
+lvwm=$(ls -ln "$M/etc/wpa_supplicant.conf" 2>/dev/null | awk '{ print $1 }')
+lvssid=$(printf 'Example Net' | od -An -tx1 | tr -d ' \n')
+if [ "$lvwm" = '-rw-------' ] && grep -q "ssid=$lvssid\$" "$M/etc/wpa_supplicant.conf" &&
+	grep -Eq 'psk=[0-9a-f]{64}$' "$M/etc/wpa_supplicant.conf" && grep -q 'key_mgmt=WPA-PSK' "$M/etc/wpa_supplicant.conf" &&
+	grep -qx 'wlans_iwn0="wlan0"' "$M/etc/rc.conf" && grep -qx 'ifconfig_wlan0="WPA DHCP"' "$M/etc/rc.conf" &&
+	! grep -rqF 'wifi-secret-words' "$lv/i.out" "$lv/i.err" "$lv/inst.log" "$M" 2>/dev/null; then
+	ok "(LV10) -W writes wpa_supplicant.conf (0600, the SSID and the PSK as hex) and never the passphrase itself"
+else
+	no "(LV10) -W writes wpa_supplicant.conf (0600, the SSID and the PSK as hex) and never the passphrase itself (mode $lvwm)"
+	sed 's/^/      | /' "$M/etc/wpa_supplicant.conf" 2>/dev/null
+fi
+if grep -q "^pkg -c $M update -f\$" "$lv/inst.log" && grep -q "^pkg -c $M upgrade -y\$" "$lv/inst.log" &&
+	grep -q "^mount -t devfs devfs $M/dev\$" "$lv/inst.log"; then
+	ok "(LV10) -U updates the packages of the installed system"
+else
+	no "(LV10) -U updates the packages of the installed system"
+fi
+lvsec "$lv/plan-m" '{"version":1,"mode":"manual","disks":["vbd0"]}'
+lvrefuse 'a plan in mode manual' 'mode erase only' -p "$lv/plan-m" -u wtfuser -H "$lv/hash" -y --progress
+lvsec "$lv/plan-r" '{"version":1,"disks":["vbd0","vbd1"],"layout":"mirror"}'
+lvrefuse 'a plan on two disks' 'exactly one disk' -p "$lv/plan-r" -u wtfuser -H "$lv/hash" -y --progress
+lvsec "$lv/plan-k" '{"version":1,"disks":["vbd0"],"colour":"red"}'
+lvrefuse 'a plan with an unknown key' 'unknown key' -p "$lv/plan-k" -u wtfuser -H "$lv/hash" -y --progress
+chmod 644 "$lv/plan-a"
+lvrefuse 'a plan file that others can read' 'mode 0600' -p "$lv/plan-a" -u wtfuser -H "$lv/hash" -y --progress
+chmod 600 "$lv/plan-a"
+lvrefuse 'an encrypted plan without -E' '-E PASSPHRASEFILE is required' -p "$lv/plan-e" -u wtfuser -H "$lv/hash" -y --progress
+lvsec "$lv/short" 'short'
+lvrefuse 'a passphrase shorter than 8 bytes' '8 to 1024 bytes' -p "$lv/plan-e" -E "$lv/short" -u wtfuser -H "$lv/hash" -y --progress
+lvrefuse '-E with a plan that does not encrypt' 'does not encrypt' -p "$lv/plan-a" -E "$lv/pass" -u wtfuser -H "$lv/hash" -y --progress
+lvrefuse '-p and -d together' 'exclude each other' -p "$lv/plan-a" -d vbd0 -u wtfuser -H "$lv/hash" -y --progress
+lvrefuse 'a hardware clock that is neither utc nor local' 'utc or local' -d vbd0 -Z gmt -u wtfuser -H "$lv/hash" -y --progress
+lvrefuse 'an unknown locale' 'no such locale' -d vbd0 -L xx_XX.UTF-8 -u wtfuser -H "$lv/hash" -y --progress
+lvbad6=2001:zz::1
+lvrefuse 'an IPv6 address that is not one' 'not an IPv6 address' -d vbd0 -6 "vtnet0:$lvbad6/64:" -u wtfuser -H "$lv/hash" -y --progress
+lvsec "$lv/wifi-bad" '{"if":"iwn0","ssid":"x","security":"wep","psk":"abcdefgh"}'
+lvrefuse 'a Wi-Fi security that is not offered' 'wpa2, wpa3 or open' -d vbd0 -W "$lv/wifi-bad" -u wtfuser -H "$lv/hash" -y --progress
+
+# (LV12) the licensed software: the catalogue of the media is valid (and
+#        empty: nothing of the default set needs an acceptance); -l
+#        installs exactly the accepted items, checked against the
+#        catalogue, and records the acceptance on the installed system
+if python3 -c 'import json, sys; c = json.load(open(sys.argv[1])); sys.exit(0 if c.get("version") == 1 and c.get("items") == [] else 1)' \
+	"$dov/usr/local/share/@SLUG@/licensed-software.json" 2>/dev/null; then
+	ok "(LV12) the catalogue of licensed software is valid JSON, version 1, and the default set needs no acceptance"
+else
+	no "(LV12) the catalogue of licensed software is valid JSON, version 1, and the default set needs no acceptance"
+fi
+mkdir -p "$S/usr/local/share/examplebsd/licenses"
+printf 'The Example Font licence: you accept it.\n' > "$S/usr/local/share/examplebsd/licenses/examplefont.txt"
+cat > "$S/usr/local/share/examplebsd/licensed-software.json" <<'EOF'
+{"version": 1, "items": [{"id": "examplefont", "name": "Example Font", "description": "a font", "size_mb": 1,
+ "licence": {"id": "Example-EULA", "text": "/usr/local/share/examplebsd/licenses/examplefont.txt"},
+ "flags": {"non_commercial": false, "vendor_key": false, "vendor_download": true, "needs_network": true},
+ "install": {"method": "pkg", "packages": ["example-font"]}}]}
+EOF
+lvlsha=$(python3 -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$S/usr/local/share/examplebsd/licenses/examplefont.txt")
+lvsec "$lv/accept" "[{\"id\":\"examplefont\",\"licence\":\"Example-EULA\",\"sha256\":\"$lvlsha\",\"timestamp\":\"2026-11-01T00:00:00Z\"}]"
+lvinst -d vbd0 -u wtfuser -H "$lv/hash" -l "$lv/accept" -y --progress
+if [ "$irc" -eq 0 ] && grep -q "^pkg -c $lv/mnt install -y example-font\$" "$lv/inst.log" &&
+	cmp -s "$lv/accept" "$lv/mnt/var/db/examplebsd/licenses-accepted.json"; then
+	ok "(LV12) -l installs the accepted item and records the acceptance in /var/db/<slug>/licenses-accepted.json"
+else
+	no "(LV12) -l installs the accepted item and records the acceptance in /var/db/<slug>/licenses-accepted.json (rc=$irc)"
+	sed 's/^/      | /' "$lv/i.out" | tail -5
+fi
+lvinst -d vbd0 -u wtfuser -H "$lv/hash" -y --progress
+if [ "$irc" -eq 0 ] && grep -q '^PROGRESS 100 ' "$lv/i.out" && ! grep -q "^pkg -c .* install" "$lv/inst.log" && [ ! -e "$lv/mnt/var/db/examplebsd/licenses-accepted.json" ]; then
+	ok "(LV12) without -l no licensed software is installed and no acceptance is recorded"
+else
+	no "(LV12) without -l no licensed software is installed and no acceptance is recorded (rc=$irc)"
+fi
+lvsec "$lv/accept-x" '[{"id":"otherthing","licence":"Example-EULA","sha256":"00","timestamp":"t"}]'
+lvrefuse 'an accepted id that is not in the catalogue' 'not in the catalogue' -d vbd0 -l "$lv/accept-x" -u wtfuser -H "$lv/hash" -y --progress
+lvsec "$lv/accept-s" '[{"id":"examplefont","licence":"Example-EULA","sha256":"0000","timestamp":"t"}]'
+lvrefuse 'an acceptance of another licence text' 'not the one on the media' -d vbd0 -l "$lv/accept-s" -u wtfuser -H "$lv/hash" -y --progress
+rm -rf "$S/usr/local/share/examplebsd/licenses" "$S/usr/local/share/examplebsd/licensed-software.json"
+
+# (LV15) the plans the installer of installer-template sends (lib/diskplan.py
+#        and lib/gui_disk.py at the pinned INSTALLER_REF): usage together,
+#        usage separate with a data volume on its own disk, a data volume
+#        of the erase plan; and --capabilities says what is offered
+for d in vbd2 vbd2s0 vbd2s0a; do : > "$lv/dev/$d"; done
+printf '%s 21\n%s 22\n%s 23\n' "$lv/dev/vbd2" "$lv/dev/vbd2s0" "$lv/dev/vbd2s0a" >> "$lv/rdev"
+lvsec "$lv/plan-t" '{"version":1,"mode":"erase","boot":"uefi","filesystem":"hammer2","encryption":{"enabled":false,"swap":false},"swap_mb":2048,"sector_4k":true,"trim":true,"wipe":{"vbd0":"quick"},"confirm_foreign":[],"disks":["vbd0"],"layout":"single","usage":"together"}'
+LV_DISKS="vbd1 vbd0 vbd2" lvinst -p "$lv/plan-t" -u wtfuser -H "$lv/hash" -y --progress
+r1=$irc
+lvsec "$lv/plan-s" '{"version":1,"mode":"erase","boot":"uefi","filesystem":"ufs","encryption":{"enabled":false,"swap":false},"swap_mb":1024,"sector_4k":false,"trim":false,"wipe":{"vbd0":"quick","vbd2":"secure"},"confirm_foreign":["vbd2"],"usage":"separate","disks":["vbd0"],"layout":"single","data":[{"name":"media","disks":["vbd2"],"layout":"single","filesystem":"ufs","mount":"/srv/media"}]}'
+LV_DISKS="vbd1 vbd0 vbd2" lvinst -p "$lv/plan-s" -u wtfuser -H "$lv/hash" -y --progress
+r2=$irc
+if [ "$r1" -eq 0 ] && [ "$r2" -eq 0 ] && grep -q '^gpt add -i 0 -t dragonfly vbd2$' "$lv/inst.log" &&
+	grep -q "^dd if=/dev/zero of=$lv/dev/vbd2 bs=1m\$" "$lv/inst.log" && grep -q "^newfs -U $lv/dev/vbd2s0a\$" "$lv/inst.log" &&
+	grep -Eq '^/dev/part-by-label/examplebsd-media-[0-9a-f]{8}\.a	/srv/media	ufs	rw	2	2$' "$lv/mnt/etc/fstab" &&
+	[ -d "$lv/mnt/srv/media" ]; then
+	ok "(LV15) the plans of the installer: usage together, and usage separate with a data volume (its own disk, label, fstab line and mount point)"
+else
+	no "(LV15) the plans of the installer: usage together, and usage separate with a data volume (its own disk, label, fstab line and mount point) ($r1/$r2)"
+	tail -n 3 "$lv/i.out" | sed 's/^/      | /'; grep -n 'media' "$lv/mnt/etc/fstab" 2>/dev/null | sed 's/^/      | /'
+fi
+lvsec "$lv/plan-x" '{"version":1,"mode":"erase","boot":"uefi","filesystem":"hammer2","encryption":{"enabled":false,"swap":false},"swap_mb":0,"wipe":{},"confirm_foreign":[],"disks":["vbd0"],"layout":"single","data":[{"name":"data","disks":["vbd0"],"layout":"single","filesystem":"hammer2","mount":"/data"}]}'
+lvrefuse 'a data volume on the system disk' 'appears twice' -p "$lv/plan-x" -u wtfuser -H "$lv/hash" -y --progress
+lvsec "$lv/plan-b" '{"version":1,"mode":"erase","boot":"bios","disks":["vbd0"],"layout":"single"}'
+lvrefuse 'a BIOS plan' 'UEFI boot only' -p "$lv/plan-b" -u wtfuser -H "$lv/hash" -y --progress
+lvsec "$lv/plan-a" '{"version":1,"mode":"alongside","disks":[],"alongside":{"disk":"vbd0","region":{"start_mb":100,"size_mb":20000}}}'
+lvrefuse 'an alongside plan' 'mode erase only' -p "$lv/plan-a" -u wtfuser -H "$lv/hash" -y --progress
+caps=$(sh "$lv/examplebsd-install" --capabilities 2>/dev/null)
+if printf '%s' "$caps" | python3 -c 'import json, sys; c = json.load(sys.stdin); sys.exit(0 if c["modes"] == ["erase"] and c["boot"] == ["uefi"] and [l["ident"] for l in c["layouts"]] == ["single"] and ["hammer2", "HAMMER2"] in c["filesystems"] else 1)'; then
+	ok "(LV15) --capabilities prints what the command installs (erase, UEFI, single, HAMMER2/UFS) as JSON for the installer"
+else
+	no "(LV15) --capabilities prints what the command installs (erase, UEFI, single, HAMMER2/UFS) as JSON for the installer"
+fi
+
+# (LV15) the real checker of installer-template at the pinned INSTALLER_REF
+#        (lib/diskplan.py --check-capabilities, the one its adapter runs on
+#        the installed command) takes what --capabilities prints and gives
+#        back a usable object with boot ["uefi"]. The checkout comes from
+#        WTFBSD_TEST_INSTALLER_TEMPLATE, or is cloned at the pin.
+lv15ref=$(sed -n 's/^INSTALLER_REF_DEFAULT=\([0-9a-f]*\)$/\1/p' "$build")
+lv15it=''
+if [ -n "${WTFBSD_TEST_INSTALLER_TEMPLATE:-}" ] && [ -f "$WTFBSD_TEST_INSTALLER_TEMPLATE/lib/diskplan.py" ]; then
+	lv15it=$WTFBSD_TEST_INSTALLER_TEMPLATE
+elif command -v git > /dev/null 2>&1 &&
+	timeout 120 git clone --quiet --no-checkout https://github.com/wtfbsd/installer-template.git "$work/lv15it" > /dev/null 2>&1 &&
+	git -C "$work/lv15it" -c advice.detachedHead=false checkout --quiet "$lv15ref" > /dev/null 2>&1; then
+	lv15it="$work/lv15it"
+fi
+if [ -z "$lv15it" ]; then
+	skip "(LV15) the real installer-template checker accepts --capabilities (no checkout: set WTFBSD_TEST_INSTALLER_TEMPLATE or allow the clone)"
+else
+	lv15caps=$(sh "$lv/examplebsd-install" --capabilities 2>/dev/null | python3 -I "$lv15it/lib/diskplan.py" --check-capabilities)
+	lv15rc=$?
+	if [ "$lv15rc" -eq 0 ] && printf '%s' "$lv15caps" | python3 -c '
+import json, sys
+c = json.load(sys.stdin)
+want = {"modes", "boot", "layouts", "filesystems", "data_pools", "usages", "encryption", "swap_encryption", "not_offered"}
+sys.exit(0 if set(c) == want and c["boot"] == ["uefi"] and c["modes"] == ["erase"] and c["layouts"][0]["ident"] == "single" and c["usages"] == ["together", "separate"] and c["swap_encryption"] is True else 1)'; then
+		ok "(LV15) lib/diskplan.py --check-capabilities of installer-template ($(printf '%.7s' "$lv15ref")) takes the output of --capabilities whole: boot [uefi], erase, single, usages together/separate, swap encryption, no key left out"
+	else
+		no "(LV15) lib/diskplan.py --check-capabilities of installer-template ($(printf '%.7s' "$lv15ref")) takes the output of --capabilities whole: boot [uefi], erase, single, usages together/separate, swap encryption, no key left out (rc=$lv15rc)"
+		printf '      | %s\n' "$lv15caps"
+	fi
+fi
+
+# (LV8) the first boot applies the host name, the time zone and the keymap
+#       of the installer; a bad value stops it before the system changes
+F="$lv/fbt"
+rm -rf "$F"; mkdir -p "$F/etc/rc.d" "$F/boot" "$F/home" "$F/var/db" "$F/usr/share/zoneinfo/Europe" "$F/usr/share/syscons/keymaps" "$F/usr/local/etc" "$F/fakebin"
+printf 'TZDATA\n' > "$F/usr/share/zoneinfo/Europe/Berlin"; : > "$F/usr/share/syscons/keymaps/de.iso.kbd"
+printf 'root:*:0:0::0:0:Charlie &:/root:/bin/sh\n' > "$F/etc/master.passwd"
+printf 'wtfuser:*:1001:1001:W:%s/home/wtfuser:/bin/sh\n' "$F" > "$F/etc/passwd"
+printf 'hostname="examplebsd"\nlightdm_enable="YES"\n' > "$F/etc/rc.conf"
+for t in pw logger chown hostname kbdcontrol; do
+	printf '#!/bin/sh\nprintf "%s %%s\\n" "$*" >> "%s/cmd.log"\ncase "$1" in usershow) exit 1 ;; esac\nexit 0\n' "$t" "$F" > "$F/fakebin/$t"
+done
+chmod 755 "$F/fakebin/"*
+sed -e "s#/etc/rc\\.subr#$lv/rcsubr/rc.subr#g" -e "s#/usr/local/#@F@/usr/local/#g" -e "s#\\([^l]\\)/etc/#\\1@F@/etc/#g" \
+	-e "s#/boot/#@F@/boot/#g" -e "s#/usr/share/#@F@/usr/share/#g" -e "s#/var/db/#@F@/var/db/#g" -e "s#/home#@F@/home#g" -e "s#/firstboot\\([^_a-z-]\\)#$F/firstboot\\1#g" -e 's/@SLUG@/examplebsd/g' \
+	"$repo/overlay/base/rootfs/etc/rc.d/firstboot_user" | sed "s#@F@#$F#g" > "$F/etc/rc.d/firstboot_user"
+umask 077
+printf 'USERNAME=wtfuser\nPASSWORD_HASH=%s\nHOSTNAME=box.example.org\nTIMEZONE=Europe/Berlin\nKEYMAP=de.iso\nDOAS_NOPASS=yes\n' '$6$s$h' > "$F/boot/firstboot-user.conf"
+printf 'permit persist :wheel\n' > "$F/usr/local/etc/doas.conf"
+umask 022
+PATH="$F/fakebin:$PATH" sh "$F/etc/rc.d/firstboot_user" start > "$F/out.log" 2>&1
+frc=$?
+if [ "$frc" -eq 0 ] && grep -q '^hostname="box.example.org"$' "$F/etc/rc.conf" && [ "$(grep -c '^hostname=' "$F/etc/rc.conf")" -eq 1 ] &&
+	grep -q '^keymap="de.iso"$' "$F/etc/rc.conf" && grep -q '^lightdm_enable="YES"$' "$F/etc/rc.conf" &&
+	[ "$(cat "$F/etc/localtime" 2>/dev/null)" = TZDATA ] && [ "$(cat "$F/var/db/zoneinfo" 2>/dev/null)" = Europe/Berlin ] &&
+	grep -q '^hostname box.example.org$' "$F/cmd.log" && [ -f "$F/boot/firstboot-user.conf.done" ] &&
+	grep -qx 'permit nopass wtfuser' "$F/usr/local/etc/doas.conf"; then
+	ok "(LV8) the first boot sets the host name, the time zone, the keymap and doas without password (-P)"
+else
+	no "(LV8) the first boot sets the host name, the time zone, the keymap and doas without password (-P) (rc=$frc)"
+	sed 's/^/      | /' "$F/out.log" "$F/etc/rc.conf" "$F/cmd.log" 2>/dev/null
+fi
+rm -f "$F/boot/firstboot-user.conf.done" "$F/etc/localtime"
+printf 'hostname="examplebsd"\n' > "$F/etc/rc.conf"
+umask 077
+printf 'USERNAME=wtfuser\nPASSWORD_HASH=%s\nTIMEZONE=../../etc/passwd\n' '$6$s$h' > "$F/boot/firstboot-user.conf"
+umask 022
+: > "$F/cmd.log"
+PATH="$F/fakebin:$PATH" sh "$F/etc/rc.d/firstboot_user" start > "$F/out.log" 2>&1
+frc=$?
+if [ "$frc" -ne 0 ] && grep -q 'TIMEZONE is not a time zone' "$F/out.log" && [ ! -e "$F/etc/localtime" ] && ! grep -q useradd "$F/cmd.log" && [ -f "$F/boot/firstboot-user.conf" ]; then
+	ok "(LV8) a TIMEZONE that is not a zoneinfo name stops the first boot before anything changes"
+else
+	no "(LV8) a TIMEZONE that is not a zoneinfo name stops the first boot before anything changes (rc=$frc)"
+fi
+
+# (LV11) every image the README shows is in the tree (docs/screenshots),
+#        a PNG, and small enough for a README (300 KB at most)
+lvimgs=$(grep -o '!\[[^]]*\]([^)]*)' "$repo/README.md" | sed 's/.*](\(.*\))$/\1/')
+lvbad=''
+lvn=0
+for i in $lvimgs; do
+	lvn=$((lvn + 1))
+	case $i in
+	http://* | https://* | /* | *..*) lvbad="$lvbad $i(not-a-tree-path)"; continue ;;
+	esac
+	f="$repo/$i"
+	if [ ! -f "$f" ]; then
+		lvbad="$lvbad $i(missing)"
+	elif [ "$(od -An -tx1 -N8 "$f" | tr -d ' \n')" != 89504e470d0a1a0a ]; then
+		lvbad="$lvbad $i(not-png)"
+	elif [ "$(wc -c < "$f")" -gt 307200 ]; then
+		lvbad="$lvbad $i(over-300KB)"
+	fi
+done
+if [ "$lvn" -ge 7 ] && [ -z "$lvbad" ] && grep -q '^## What it looks like$' "$repo/README.md"; then
+	ok "(LV11) the README shows $lvn screenshots under What it looks like, and every image link resolves to a PNG of the tree"
+else
+	no "(LV11) the README shows at least 7 screenshots under What it looks like, and every image link resolves to a PNG of the tree ($lvn:$lvbad)"
+fi
+
+# (LV14) the branding of the desktop from the pinned artwork template (a
+#        pre-rendered pack): every spot its branding/spots.tsv marks
+#        supported on DragonFly is installed, the identity file matches
+#        product.conf and names the base from the built kernel, the identity
+#        line is stamped on the greeter and the wallpapers, the loader menu
+#        names the product, and the variant, the version, the pack's
+#        checksum and commit are honoured
+REAL_PROFILE=desktop realbuild "$work/lv14" -u ciuser -P "$work/pass.hash"
+b="$realout/desktop/root"
+pname=$(sed -n "s/^DISTRO_NAME='\{0,1\}\([^']*\)'\{0,1\}$/\1/p" "$fixture")
+lv14sup=$(awk -F '\t' 'NR == 1 { for (i = 1; i <= NF; i++) c[$i] = i; next }
+	/^#/ { next } $c["dragonfly"] !~ /^(n\/a|check:|-$)/ { print $c["spot"] }' "$repo/tests/fixtures/fake-artwork/branding/spots.tsv" | sort)
+lv14ins=$(cut -f1 "$realout/desktop/branding/installed-spots" 2>/dev/null | sort)
+if [ "$realrc" -eq 0 ] && [ -n "$lv14sup" ] && [ "$lv14sup" = "$lv14ins" ]; then
+	ok "(LV14) every spot branding/spots.tsv marks supported on DragonFly is installed ($(printf '%s\n' "$lv14sup" | grep -c .))"
+else
+	no "(LV14) every spot branding/spots.tsv marks supported on DragonFly is installed (rc=$realrc)"
+	tail -n 4 "$work/lv14/build.log" | sed 's/^/      | /'
+fi
+lv14miss=''
+for f in /usr/local/share/examplebsd/lightdm/greeter-1920x1080.png /usr/local/etc/lightdm/lightdm-gtk-greeter.conf \
+	/usr/local/share/themes/examplebsd-greeter/gtk-3.0/gtk.css /usr/local/share/examplebsd/wallpapers/wallpaper-1-1920x1080.png \
+	/usr/local/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-desktop.xml /usr/local/etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-panel.xml \
+	/usr/local/share/icons/hicolor/48x48/apps/examplebsd-logo.png /usr/local/share/icons/hicolor/scalable/apps/examplebsd-installer.svg \
+	/usr/local/share/examplebsd/installer/header.png /usr/local/share/examplebsd/dm/pixmaps/examplebsd-color.xpm \
+	/usr/local/etc/X11/xdm/Xresources /boot/dloader.menu /etc/issue /etc.hdd/issue; do
+	[ -s "$b$f" ] || lv14miss="$lv14miss $f"
+done
+if [ "$realrc" -eq 0 ] && [ -z "$lv14miss" ]; then
+	ok "(LV14) the greeter, its theme, the wallpapers, the Xfce defaults, the icons, the loader menu and the login banner are in their DragonFly places"
+else
+	no "(LV14) the greeter, its theme, the wallpapers, the Xfce defaults, the icons, the loader menu and the login banner are in their DragonFly places:$lv14miss"
+fi
+idf="$b/usr/local/share/examplebsd/identity"
+if grep -qx "PRODUCT=$pname" "$idf" 2>/dev/null && grep -qx 'VERSION=2026.11' "$idf" &&
+	grep -qx 'BASE=DragonFly 6.4.2' "$idf" && grep -qx 'VARIANT=Default' "$idf" && grep -qx 'ARCH=amd64' "$idf" &&
+	grep -qx 'BUILD=' "$idf"; then
+	ok "(LV14) /usr/local/share/<slug>/identity matches product.conf (PRODUCT_VERSION unset: year.month) and names the base from the kernel (DragonFly 6.4.2)"
+else
+	no "(LV14) /usr/local/share/<slug>/identity matches product.conf (PRODUCT_VERSION unset: year.month) and names the base from the kernel (DragonFly 6.4.2)"
+	sed 's/^/      | /' "$idf" 2>/dev/null
+fi
+lvline="STAMP $pname 2026.11 / DragonFly 6.4.2 / Default / amd64"
+if grep -qx "$lvline" "$b/usr/local/share/examplebsd/lightdm/greeter-1920x1080.png" 2>/dev/null &&
+	grep -qx "$lvline" "$b/usr/local/share/examplebsd/wallpapers/wallpaper-1-1920x1080.png" &&
+	grep -qx "$lvline" "$b/usr/local/share/examplebsd/wallpapers/wallpaper-1-3840x2160.png"; then
+	ok "(LV14) the identity line is stamped on the greeter background and on every wallpaper"
+else
+	no "(LV14) the identity line is stamped on the greeter background and on every wallpaper"
+fi
+if grep -qx 'menuitem 1 "Boot ExampleBSD \[${default_kernel}\]"' "$b/boot/dloader.menu" 2>/dev/null &&
+	grep -qx 'menuadd boot -s' "$b/boot/dloader.menu" && grep -qx 'menuitem R "Reboot"' "$b/boot/dloader.menu" &&
+	! grep -q 'Boot DragonFly' "$b/boot/dloader.menu" && grep -qx 'fred_disable="YES"' "$b/boot/loader.conf"; then
+	ok "(LV14) the DragonFly loader menu names the product (its menuadd lines kept) and its ASCII art is off"
+else
+	no "(LV14) the DragonFly loader menu names the product (its menuadd lines kept) and its ASCII art is off"
+	sed 's/^/      | /' "$b/boot/dloader.menu" 2>/dev/null
+fi
+if grep -q ':im=\\r\\nExampleBSD (%h) (%t)\\r\\n\\r\\n:sp#1200:' "$b/etc/gettytab" 2>/dev/null &&
+	grep -q ':im=\\r\\nExampleBSD (%h)' "$b/etc.hdd/gettytab" && grep -q 'ExampleBSD - variant default' "$b/etc.hdd/motd"; then
+	ok "(LV14) the login banner (gettytab im=) and the motd name the product, on the live media and the installed system"
+else
+	no "(LV14) the login banner (gettytab im=) and the motd name the product, on the live media and the installed system"
+	grep -n 'im=' "$b/etc/gettytab" 2>/dev/null | sed 's/^/      | /'
+fi
+# the cyberpunk variant and a test version
+grep -v '^PRODUCT_VERSION=\|^ARTWORK_VARIANT=' "$fixture" > "$work/lv14-cyber.conf"
+printf "ARTWORK_VARIANT='cyberpunk'\nPRODUCT_VERSION='1.2-rc1'\n" >> "$work/lv14-cyber.conf"
+ARTWORK_PACK=$(mkpack cyberpunk "$work/packs") REAL_CONF="$work/lv14-cyber.conf" REAL_PROFILE=desktop realbuild "$work/lv14c" -u ciuser -P "$work/pass.hash"
+c="$realout/desktop/root/usr/local/share/examplebsd"
+if [ "$realrc" -eq 0 ] && grep -qx 'VARIANT=Cyberpunk' "$c/identity" 2>/dev/null && grep -qx 'BUILD=2026-11-01' "$c/identity" &&
+	grep -q '^variant=cyberpunk ' "$c/lightdm/greeter-1920x1080.png" &&
+	grep -qx "STAMP $pname 1.2-rc1 / DragonFly 6.4.2 / Cyberpunk / amd64 / build 2026-11-01" "$c/lightdm/greeter-1920x1080.png"; then
+	ok "(LV14) ARTWORK_VARIANT=cyberpunk installs the cyberpunk pack, and a test PRODUCT_VERSION (1.2-rc1) adds the build date"
+else
+	no "(LV14) ARTWORK_VARIANT=cyberpunk installs the cyberpunk pack, and a test PRODUCT_VERSION (1.2-rc1) adds the build date (rc=$realrc)"
+	tail -n 3 "$work/lv14c/build.log" | sed 's/^/      | /'
+fi
+REAL_CONF="$work/lv14-cyber.conf" REAL_PROFILE=desktop realbuild "$work/lv14v" -u ciuser -P "$work/pass.hash"
+if [ "$realrc" -ne 0 ] && grep -q 'holds the variant default, not cyberpunk' "$work/lv14v/build.log"; then
+	ok "(LV14) a pack of another variant than ARTWORK_VARIANT stops the build"
+else
+	no "(LV14) a pack of another variant than ARTWORK_VARIANT stops the build (rc=$realrc)"
+fi
+# the checksum, the commit and the product of the pack
+p2=$(mkpack default "$work/packs2"); printf 'x' >> "$p2"
+ARTWORK_PACK=$p2 sh "$build" -n -c "$fixture" -p desktop --no-user -o "$lv/a3" > "$lv/a3.log" 2>&1; r3=$?
+p3=$(mkpack default "$work/packs3")
+ARTWORK_PACK=$p3 ARTWORK_REF=0123456789abcdef0 REAL_PROFILE=desktop realbuild "$work/lv14r" -u ciuser -P "$work/pass.hash"; r4=$realrc
+p4=$(mkpack default "$work/packs4" otherbsd)
+ARTWORK_PACK=$p4 REAL_PROFILE=desktop realbuild "$work/lv14o" -u ciuser -P "$work/pass.hash"; r5=$realrc
+if [ "$r3" -ne 0 ] && grep -q 'does not match its checksum' "$lv/a3.log" &&
+	[ "$r4" -ne 0 ] && grep -q 'not from ARTWORK_REF 0123456789abcdef0' "$work/lv14r/build.log" &&
+	[ "$r5" -ne 0 ] && grep -q 'was made for otherbsd, not for examplebsd' "$work/lv14o/build.log"; then
+	ok "(LV14) a pack with a wrong checksum, from another commit than ARTWORK_REF, or for another product stops the build"
+else
+	no "(LV14) a pack with a wrong checksum, from another commit than ARTWORK_REF, or for another product stops the build ($r3/$r4/$r5)"
+fi
+# the pinned defaults: the merged main of installer-template and of the
+# artwork template, cloned when nothing local is given
+env -u INSTALLER_DIR -u ARTWORK_PACK -u ARTWORK_PACKS_SHA256 sh "$build" -n -c "$fixture" -p desktop --no-user -o "$lv/a4" > "$lv/a4.log" 2>&1
+if grep -q 'checkout --quiet f2e9c48b051f473029ef44a78264b2239ff73141$' "$lv/a4.log" &&
+	grep -q 'fetch -q -o .*/examplebsd-353ef29aa000-default.tar.xz https://github.com/wtfbsd/artwork-template/releases/download/pack-353ef29aa000/examplebsd-353ef29aa000-default.tar.xz$' "$lv/a4.log" &&
+	grep -q 'sha256 10f2507cd0bb325534157f073d79bc08da6a5e1ded34686ebe683a75a0a1d3e4' "$lv/a4.log"; then
+	ok "(LV14) INSTALLER_REF and ARTWORK_REF default to the pinned main commits; the published pack of the variant is fetched and its checksum is pinned"
+else
+	no "(LV14) INSTALLER_REF and ARTWORK_REF default to the pinned main commits; the published pack of the variant is fetched and its checksum is pinned"
+	grep -n 'checkout\|fetch\|artwork' "$lv/a4.log" | sed 's/^/      | /'
+fi
+# (LV17) the product.conf keys of the live media (wtfbsd/agents #5,
+#        questions.yaml): INSTALLER_REF, INSTALLER_URL, PRODUCT_VERSION,
+#        ARTWORK_VARIANT, ARTWORK_REF, ARTWORK_SHA256. Set, they are used;
+#        empty, the template's pins and defaults stay.
+lv17s=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+{ cat "$fixture"; printf '%s\n' 'INSTALLER_REF=v1.0' 'INSTALLER_URL=https://example.org/fork/installer-template.git' \
+	'PRODUCT_VERSION=1.2+rc1' 'ARTWORK_VARIANT=cyberpunk' 'ARTWORK_REF=0123456789abcdef0123456789abcdef01234567' \
+	"ARTWORK_SHA256=$lv17s"; } > "$lv/all6.conf"
+{ cat "$fixture"; printf '%s\n' 'INSTALLER_REF=' 'INSTALLER_URL=' 'PRODUCT_VERSION=' 'ARTWORK_VARIANT=' 'ARTWORK_REF=' 'ARTWORK_SHA256='; } > "$lv/empty6.conf"
+env -u INSTALLER_DIR -u ARTWORK_PACK -u ARTWORK_PACKS_SHA256 -u INSTALLER_REF -u INSTALLER_REPO -u ARTWORK_REF \
+	sh "$build" -n -c "$lv/all6.conf" -p desktop --no-user -o "$lv/a17" > "$lv/a17.log" 2>&1
+r17a=$?
+env -u INSTALLER_DIR -u ARTWORK_PACK -u ARTWORK_PACKS_SHA256 -u INSTALLER_REF -u INSTALLER_REPO -u ARTWORK_REF \
+	sh "$build" -n -c "$lv/empty6.conf" -p desktop --no-user -o "$lv/e17" > "$lv/e17.log" 2>&1
+r17e=$?
+if [ "$r17a" -eq 0 ] &&
+	grep -q 'git clone --quiet --no-checkout https://example.org/fork/installer-template.git ' "$lv/a17.log" &&
+	grep -q 'checkout --quiet v1.0$' "$lv/a17.log" &&
+	grep -q "artwork  the published pack https://github.com/wtfbsd/artwork-template/releases/download/pack-0123456789ab/examplebsd-0123456789ab-cyberpunk.tar.xz (sha256 $lv17s), variant cyberpunk, version 1.2+rc1\$" "$lv/a17.log"; then
+	ok "(LV17) a product.conf with all six keys of the live media (INSTALLER_REF tag, INSTALLER_URL, PRODUCT_VERSION, ARTWORK_VARIANT, ARTWORK_REF, ARTWORK_SHA256) is accepted and each one is used"
+else
+	no "(LV17) a product.conf with all six keys of the live media (INSTALLER_REF tag, INSTALLER_URL, PRODUCT_VERSION, ARTWORK_VARIANT, ARTWORK_REF, ARTWORK_SHA256) is accepted and each one is used (rc=$r17a)"
+	grep -n 'installer\|artwork\|clone\|checkout\|product.conf' "$lv/a17.log" | head -8 | sed 's/^/      | /'
+fi
+if [ "$r17e" -eq 0 ] &&
+	grep -q 'git clone --quiet --no-checkout https://github.com/wtfbsd/installer-template.git ' "$lv/e17.log" &&
+	grep -q 'checkout --quiet f2e9c48b051f473029ef44a78264b2239ff73141$' "$lv/e17.log" &&
+	grep -q 'artwork  the published pack https://github.com/wtfbsd/artwork-template/releases/download/pack-353ef29aa000/examplebsd-353ef29aa000-default.tar.xz (sha256 10f2507cd0bb325534157f073d79bc08da6a5e1ded34686ebe683a75a0a1d3e4), variant default, version 2026.11$' "$lv/e17.log"; then
+	ok "(LV17) the six keys left empty keep the template's pins and defaults (the pinned installer from the public repository, pack 353ef29 default with its pinned sum, version 2026.11)"
+else
+	no "(LV17) the six keys left empty keep the template's pins and defaults (the pinned installer from the public repository, pack 353ef29 default with its pinned sum, version 2026.11) (rc=$r17e)"
+	grep -n 'installer\|artwork\|clone\|checkout\|product.conf' "$lv/e17.log" | head -8 | sed 's/^/      | /'
+fi
+{ cat "$fixture"; printf '%s\n' "ARTWORK_SHA256=$lv17s"; } > "$lv/sum17.conf"
+{ cat "$fixture"; printf '%s\n' 'INSTALLER_URL=http://example.org/installer-template.git'; } > "$lv/url17.conf"
+{ cat "$fixture"; printf '%s\n' 'ARTWORK_SHA256=abc'; } > "$lv/bad17.conf"
+env -u INSTALLER_DIR sh "$build" -n -c "$lv/sum17.conf" -p desktop --no-user -o "$lv/s17" > "$lv/s17.log" 2>&1; r17s=$?
+env -u INSTALLER_DIR -u INSTALLER_REPO sh "$build" -n -c "$lv/url17.conf" -p desktop --no-user -o "$lv/u17" > "$lv/u17.log" 2>&1; r17u=$?
+env -u INSTALLER_DIR sh "$build" -n -c "$lv/bad17.conf" -p desktop --no-user -o "$lv/b17" > "$lv/b17.log" 2>&1; r17b=$?
+if [ "$r17s" -ne 0 ] && grep -q 'does not match ARTWORK_SHA256 of product.conf' "$lv/s17.log" &&
+	[ "$r17u" -ne 0 ] && grep -q 'INSTALLER_URL (INSTALLER_REPO) must be an https URL' "$lv/u17.log" &&
+	[ "$r17b" -ne 0 ] && grep -q 'ARTWORK_SHA256 must be 64 lowercase hex digits' "$lv/b17.log"; then
+	ok "(LV17) a local pack that does not match ARTWORK_SHA256, an INSTALLER_URL that is not https, and an ARTWORK_SHA256 that is not a sha256 are refused"
+else
+	no "(LV17) a local pack that does not match ARTWORK_SHA256, an INSTALLER_URL that is not https, and an ARTWORK_SHA256 that is not a sha256 are refused ($r17s/$r17u/$r17b)"
+fi
+# the download, through a stand-in for fetch(1): a pack that matches the
+# pinned checksum is used, any other is refused before it is unpacked
+mkdir -p "$lv/fetchbin"
+cat > "$lv/fetchbin/fetch" <<'EOF'
+#!/bin/sh
+printf 'CMD fetch %s\n' "$*" >> "$STUB_LOG"
+[ "$1" = -q ] && [ "$2" = -o ] || exit 2
+cp "$FAKE_DOWNLOAD" "$3"
+EOF
+chmod 755 "$lv/fetchbin/fetch"
+pd=$(mkpack default "$work/packs5")
+awk '{ print $1 "  " $2 }' "$pd.sha256" > "$lv/pinned.sha256"
+FAKE_DOWNLOAD=$pd ARTWORK_PACKS_SHA256="$lv/pinned.sha256" REAL_PATH_PREFIX="$lv/fetchbin" \
+	REAL_NO_PACK=1 REAL_PROFILE=desktop realbuild "$work/lv14f" -u ciuser -P "$work/pass.hash"; r8=$realrc
+FAKE_DOWNLOAD=$pd REAL_PATH_PREFIX="$lv/fetchbin" ARTWORK_PACKS_SHA256="$repo/tools/artwork-packs.sha256" \
+	REAL_NO_PACK=1 REAL_PROFILE=desktop realbuild "$work/lv14g" -u ciuser -P "$work/pass.hash"; r9=$realrc
+if [ "$r8" -eq 0 ] && grep -q '^CMD fetch -q -o .*examplebsd-353ef29aa000-default.tar.xz https://github.com/wtfbsd/artwork-template/releases/download/pack-353ef29aa000/' "$work/lv14f/stub.log" &&
+	[ -s "$work/lv14f/out/desktop/root/usr/local/share/examplebsd/identity" ] &&
+	[ "$r9" -ne 0 ] && grep -q 'does not match the checksum pinned in' "$work/lv14g/build.log" &&
+	[ ! -d "$work/lv14g/out/artwork-pack/examplebsd-353ef29aa000-default" ]; then
+	ok "(LV14) the downloaded pack is used when it matches the pinned checksum and refused before unpacking when it does not"
+else
+	no "(LV14) the downloaded pack is used when it matches the pinned checksum and refused before unpacking when it does not ($r8/$r9)"
+	tail -n 3 "$work/lv14f/build.log" "$work/lv14g/build.log" | sed 's/^/      | /'
+fi
+ARTWORK_PACKS_SHA256="$repo/tools/artwork-packs.sha256" env -u ARTWORK_PACK ARTWORK_REF=0123456789abcdef sh "$build" -n -c "$fixture" -p desktop --no-user -o "$lv/a5" > "$lv/a5.log" 2>&1
+if [ $? -ne 0 ] && grep -q 'no pinned checksum for the artwork pack examplebsd-0123456789ab-default.tar.xz' "$lv/a5.log"; then
+	ok "(LV14) an ARTWORK_REF without a pinned pack checksum is refused"
+else
+	no "(LV14) an ARTWORK_REF without a pinned pack checksum is refused"
+fi
+ARTWORK_PACKS_SHA256="$repo/tools/artwork-packs.sha256" sh "$build" -n -c "$fixture" -p desktop --no-user -o "$lv/a6" > "$lv/a6.log" 2>&1
+if [ $? -ne 0 ] && grep -q 'examplebsd-353ef29aa000-default.tar.xz is not the one pinned in' "$lv/a6.log"; then
+	ok "(LV14) a local pack named like a pinned one but with other content is refused"
+else
+	no "(LV14) a local pack named like a pinned one but with other content is refused"
+fi
+# a supported spot this template cannot install, and a missing column
+rm -rf "$lv/art5"; cp -R "$repo/tests/fixtures/fake-artwork" "$lv/art5"
+printf 'new-spot\tsomething\tsomewhere\t-\t-\t-\t/usr/local/share/<slug>/new\t-\t-\t-\tnew/thing\t-\n' >> "$lv/art5/branding/spots.tsv"
+REAL_NO_PACK=1 ARTWORK_DIR="$lv/art5" REAL_PROFILE=desktop realbuild "$work/lv14s" -u ciuser -P "$work/pass.hash"; r6=$realrc
+rm -rf "$lv/art6"; cp -R "$repo/tests/fixtures/fake-artwork" "$lv/art6"
+awk -F '\t' 'BEGIN { OFS = "\t" } NR == 1 { for (i = 1; i <= NF; i++) if ($i == "dragonfly") $i = "dragonflybsd" } { print }' \
+	"$repo/tests/fixtures/fake-artwork/branding/spots.tsv" > "$lv/art6/branding/spots.tsv"
+REAL_NO_PACK=1 ARTWORK_DIR="$lv/art6" REAL_PROFILE=desktop realbuild "$work/lv14m" -u ciuser -P "$work/pass.hash"; r7=$realrc
+if [ "$r6" -ne 0 ] && grep -q 'spot new-spot is supported on DragonFly in branding/spots.tsv' "$work/lv14s/build.log" &&
+	[ "$r7" -ne 0 ] && grep -q 'has no spot, dragonfly or rendered column' "$work/lv14m/build.log"; then
+	ok "(LV14) a spot the list marks supported that this template cannot install, or a missing column, stops the build"
+else
+	no "(LV14) a spot the list marks supported that this template cannot install, or a missing column, stops the build ($r6/$r7)"
+	tail -n 2 "$work/lv14s/build.log" "$work/lv14m/build.log" | sed 's/^/      | /'
+fi
+# a source checkout of the template is rendered (render.sh --identity)
+REAL_NO_PACK=1 ARTWORK_DIR="$repo/tests/fixtures/fake-artwork" REAL_PROFILE=desktop realbuild "$work/lv14d" -u ciuser -P "$work/pass.hash"
+if [ "$realrc" -eq 0 ] && grep -qx "STAMP $pname 2026.11 / DragonFly 6.4.2 / Default / amd64" "$realout/desktop/root/usr/local/share/examplebsd/lightdm/greeter-1920x1080.png" 2>/dev/null; then
+	ok "(LV14) a source checkout of the artwork template (ARTWORK_DIR) is rendered with --variant and --identity"
+else
+	no "(LV14) a source checkout of the artwork template (ARTWORK_DIR) is rendered with --variant and --identity (rc=$realrc)"
+	tail -n 3 "$work/lv14d/build.log" | sed 's/^/      | /'
+fi
+
+# (LV9) the README describes the live desktop and the install command
+if grep -q 'autologin' "$repo/README.md" && grep -q 'examplebsd-install\|@SLUG@-install' "$repo/README.md" &&
+	grep -q 'INSTALLER_REF' "$repo/README.md" && grep -q 'ttyv1' "$repo/README.md"; then
+	ok "(LV9) the README describes the live desktop, the install command and INSTALLER_REF"
+else
+	no "(LV9) the README describes the live desktop, the install command and INSTALLER_REF"
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

@@ -18,6 +18,56 @@ make -C /usr/src/nrelease mkiso mkimg ISODIR=... ISOROOT=... \
 
 Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see `LICENSE`).
 
+## What it looks like
+
+ExampleBSD on **DragonFly 6.4.2** (amd64): the desktop media of the
+example product, booted in a virtual machine (UEFI, 1280x1024), installed
+onto an empty disk with the graphical installer, and the installed system
+after its first boot. (These pictures predate the branding step below:
+builds now also show the product's greeter and wallpaper with the identity
+line, for example `ExampleBSD 2026.11 · DragonFly 6.4.2 · default · amd64`,
+lower left.)
+
+1. The DragonFly 6.4.2 loader of the live media.
+
+   ![The DragonFly 6.4.2 loader of the live media](docs/screenshots/01-boot-loader.png)
+
+2. The live desktop logs the live user in by itself and opens the
+   installer first, full screen.
+
+   ![The installer opens first on the live desktop, DragonFly 6.4.2](docs/screenshots/02-installer-first.png)
+
+3. "Try the live desktop" closes it into Xfce; the "Install ExampleBSD"
+   icon (and the menu entry) opens it again.
+
+   ![The live Xfce desktop with the Install icon, DragonFly 6.4.2](docs/screenshots/03-try-the-live-desktop.png)
+
+4. The disk page.
+
+   ![The disk page, DragonFly 6.4.2](docs/screenshots/04-disk.png)
+
+5. The summary before anything is written.
+
+   ![The summary, DragonFly 6.4.2](docs/screenshots/05-summary.png)
+
+6. Installing: the install command of the template (`examplebsd-install`)
+   reports its progress.
+
+   ![Installing, DragonFly 6.4.2](docs/screenshots/06-installing.png)
+
+7. Finished.
+
+   ![Finished, DragonFly 6.4.2](docs/screenshots/07-finished.png)
+
+8. The installed system starts with the LightDM greeter: no live user, no
+   automatic login.
+
+   ![The login screen of the installed DragonFly 6.4.2 system](docs/screenshots/08-installed-login.png)
+
+9. The account made by the installer in its Xfce session.
+
+   ![The desktop of the user, DragonFly 6.4.2](docs/screenshots/09-user-desktop.png)
+
 ## Layout
 
 ```
@@ -46,8 +96,11 @@ Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see `LICENSE`).
 │   └── profiles/
 │       ├── appliance/          headless: packages.list, rc.conf.d/sshd,
 │       │                       etc/ssh/sshd_config
-│       └── desktop/            X11 only: packages.list, rc.conf.d/{dbus,sshd},
-│                               rc.conf.installed.d/lightdm,
+│       └── desktop/            X11 only: packages.list,
+│                               rc.conf.d/{dbus,sshd,lightdm},
+│                               etc/rc.d/live_session (the live desktop),
+│                               usr/local/sbin/@SLUG@-install (the install
+│                               command), usr/local/sbin/@SLUG@-live-clean,
 │                               sysctl.conf.d/evdev, the LightDM
 │                               configuration, the scfb X fallback
 │                               (the software-framebuffer X driver, so X11
@@ -56,6 +109,8 @@ Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see `LICENSE`).
 │   ├── run-tests.sh            the checks (no root, no network, no VM)
 │   ├── boot-test.sh            boots a media and waits until it is usable
 │   ├── leak-check.sh           the leak check of the tree
+│   ├── fixtures/fake-installer-template/
+│   │                           a stand-in for install-into-stage.sh
 │   ├── stubs/                  stand-ins for the tools of the build, so that
 │   │                           the suite can run the real build path
 │   └── fixtures/               the example product.conf, the canned serial log,
@@ -92,9 +147,8 @@ Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see `LICENSE`).
   real hardware).
 - `rc.conf.installed.d` fragments (base, then profile) follow the same
   rules but reach **only the installed system** (`etc.hdd/rc.conf`). Put
-  there what must not run on the live media. The desktop does this with
-  `lightdm`: a greeter on the live media would own the display, and the
-  live media has to boot to the stock installer. An image that is booted as
+  there what must not run on the live media. (LightDM runs on both: on
+  the live media it logs the live user in.) An image that is booted as
   the system itself (the appliance, which has no `installer` account) gets
   these fragments in its own `rc.conf` as well.
   DragonFly has no `rc_configured`, and nothing of this repository asks
@@ -212,7 +266,15 @@ FULLNAME=Alice        # no ':' / control characters, optional
 SSH_KEY=ssh-ed25519 <the public key>  # one authorized_keys line, may repeat
 PASSWORD_HASH=$6$...  # crypt(3), $6$, $5$ or $2b$, optional
 WHEEL=yes             # yes|no, default yes
+HOSTNAME=box          # the host name (rc.conf hostname), optional
+TIMEZONE=Europe/Paris # a zoneinfo name (/etc/localtime), optional
+KEYMAP=fr.iso         # a syscons keymap (rc.conf keymap), optional
+DOAS_NOPASS=yes       # yes|no: doas without the password, default no
+ROOT_PASSWORD_HASH=$6$... # root's own password, optional (root stays locked otherwise)
 ```
+
+The live installer (`@SLUG@-install`, below) writes this file on the disk
+it installs, with the answers of the operator.
 
 The config is validated line by line, the user is created with
 `pw useradd` (in the `wheel` group), a given hash is fed to
@@ -249,12 +311,37 @@ practice that account is the one signal.
 
 ## Installing from the live media
 
-The live desktop media does not start the greeter. It boots to the
-login prompt of the stock DragonFly installer, on the console (`ttyv0`)
-and on the serial line (`ttyd0`). Log in as `installer`, with no
-password, to start it. LightDM is switched on only for the installed
-system. Over VNC, the console is the screen you see; there is no need
-for Ctrl+Alt+F1.
+The desktop media boot a **live Xfce desktop** with the graphical
+installer of [installer-template](https://github.com/wtfbsd/installer-template)
+open first, full screen:
+
+- `/etc/rc.d/live_session` runs on the live media only (they carry the
+  `installer` account of the release tooling; the installed system does
+  not). It creates the live user `live` (the first free uid from 1100 up,
+  no password that can be typed, **not** in `wheel`), copies the
+  autostart entry of the installer into `~live/.config/autostart`, and
+  writes `lightdm.conf.d/90-live-autologin.conf`, so that LightDM logs
+  `live` in by itself (autologin) into Xfce.
+- The installer opens first. "Try the live desktop" closes it into the
+  normal Xfce session; the "Install <product>" icon on the desktop and the
+  entry in the menu open it again.
+- The front ends of the installer (GTK and text) run as `live`, never as
+  root. The live `doas.conf` gets exactly one rule for `live`, for the
+  GTK-free root helper of the installer:
+  `permit nopass live as root cmd /usr/local/libexec/wtfbsd-installer/installer-apply`
+  (no `keepenv`, no `setenv`).
+- The helper runs the install command of this template,
+  `/usr/local/sbin/@SLUG@-install` (below).
+- The installed system has **no** live user, **no** autologin and **no**
+  installer: LightDM shows the greeter. `@SLUG@-live-clean` removes all
+  of it from the copy, and runs again at every boot of a system that is
+  not the live media.
+
+The fallback is the stock DragonFly installer, on `ttyv1` (the live media
+get a getty there; LightDM owns the display on `ttyv0` and up) and on the
+serial line (`ttyd0`). Log in as `installer`, with no password, to start
+it. It runs `/usr/local/bin/after_installation_routines.sh` after its
+copy, which removes the live session from the installed system as well.
 
 Things a forker should expect from the stock installer:
 
@@ -264,6 +351,178 @@ Things a forker should expect from the stock installer:
 - "Reboot this Computer" halts the machine rather than rebooting it.
   Press a key on the console, or power-cycle the VM or machine, to boot
   the installed system.
+
+### Branding (ARTWORK_REF, ARTWORK_VARIANT, the identity line)
+
+The desktop takes its look from the artwork template, pinned like the
+installer: `ARTWORK_REF` (product.conf; default the merged main of
+artwork-template, `353ef29a...`) and `ARTWORK_VARIANT` (`default`,
+`cyberpunk`, ...). The build uses the **pre-rendered pack** of that commit
+and variant (`scripts/pack.sh` of the template), so the build host renders
+nothing and needs only ImageMagick to stamp the identity line:
+
+- by default it downloads `<slug>-<commit 12>-<variant>.tar.xz` from the
+  releases of artwork-template (`ARTWORK_PACK_URL`) and refuses it unless
+  it matches the checksum pinned in `tools/artwork-packs.sha256`, or
+  `ARTWORK_SHA256` of product.conf when it is set (a product's own
+  artwork, or another commit than the pinned one);
+- `ARTWORK_PACK=<pack.tar.xz>` (with its `.sha256` next to it) uses a pack
+  you made, for example for a product with its own name (rebrand the
+  template, then `scripts/pack.sh`);
+- `ARTWORK_DIR=<checkout>` renders a checkout of the template instead
+  (rsvg-convert, inkscape or cairosvg, and ImageMagick).
+
+The pack must have been made from `ARTWORK_REF`, for the variant and for
+the slug of the product. After the release, `tools/brand-stage.sh` writes
+into the release root:
+
+- `/usr/local/share/<slug>/identity`, in the format of the artwork
+  template (its `scripts/identity-file.sh` writes it when it has one):
+  `PRODUCT`, `VERSION` (`PRODUCT_VERSION` in product.conf, default the
+  year.month of the build, for example `2026.11`), `BASE` (read from the
+  built kernel, for example `DragonFly 6.4.2`, never typed in), `VARIANT`
+  (the label of the variant), `ARCH` and `BUILD` (the build date when the
+  version is not numbers and dots, a test build; empty otherwise);
+- the identity line `<Product> <version> · DragonFly <release> · <variant>
+  · <arch>` small and lower left on the greeter background and the
+  wallpapers: the template stamps it when its `render.sh` takes
+  `--identity`, otherwise it is stamped into the SVG sources before the
+  render;
+- every branding spot the template's `branding/spots.tsv` marks supported
+  on DragonFly (its `dragonfly` column is neither `n/a: ...` nor
+  `check: ...`; the columns are read by header name and a missing one
+  stops the build), each by the DragonFly way of installing it: the loader
+  menu, the motd and the login banner (`gettytab` `im=`, `/etc/issue`) of
+  the live media and of the installed system, the LightDM GTK greeter
+  background, configuration and theme, the xdm logo and colours, the
+  installer header, sidebar and palette, the wallpapers and the Xfce
+  defaults of new users (`/usr/local/etc/xdg/xfce4/xfconf/xfce-perchannel-xml`),
+  the distributor, menu and installer icons in every size, and the xfwm4
+  colours. A spot marked supported that this template has no way to
+  install, or whose file is not in the pack, stops the build.
+- The DragonFly loader has no image splash (its ASCII art is compiled in):
+  its branding is the menu, `/boot/dloader.menu` (the stock
+  `/boot/defaults/dloader.menu` with the titles of the template, "Boot
+  ExampleBSD ..."), and `fred_disable="YES"` in `/boot/loader.conf` hides
+  the ASCII dragonfly; the install command keeps both.
+
+The build host needs ImageMagick (`pkg install ImageMagick7-nox11`) to stamp
+the identity line, and `fetch(1)` or curl for the download.
+
+### The installer of the live desktop (INSTALLER_REF)
+
+`build.sh` takes installer-template at a pinned commit or tag,
+`INSTALLER_REF` in `product.conf` (empty: the commit this template pins),
+cloned with `git` from `INSTALLER_URL` in `product.conf` (https only;
+empty: the public repository; `INSTALLER_REPO` in the environment wins),
+or from a local checkout, `INSTALLER_DIR` in the environment, which wins.
+It runs `install-into-stage.sh <staged overlay> --conf <installer.conf>
+--artwork <the unpacked pack>` (the product name, the slug,
+`OS=dragonfly`, keymap `us.iso`, time zone UTC; `--metalog` when built
+without root). With `--artwork` the script runs `python3` on the build
+host (`pkg install lang/python3`).
+
+The six product.conf keys of the live media (wtfbsd/agents
+`questions.yaml`) all read an empty value as "not set": `INSTALLER_REF`,
+`INSTALLER_URL`, `PRODUCT_VERSION`, `ARTWORK_VARIANT`, `ARTWORK_REF` and
+`ARTWORK_SHA256` then take the template's pin or default.
+The desktop is refused without either. The desktop packages add
+`lang/python3`, `devel/py-pygobject` (PyGObject), `x11-toolkits/gtk30`,
+`x11/xterm` and `devel/bsddialog`.
+
+### The install command: `@SLUG@-install`
+
+```
+@SLUG@-install -p PLANFILE | -d DISK  -u USER -H HASHFILE [-c FULLNAME] [-P] [-A]
+               [-k PUBKEYFILE] [-n HOSTNAME] [-z TIMEZONE] [-Z utc|local]
+               [-K KEYMAP] [-L LOCALE] [-r locked|ROOTHASHFILE] [-E PASSPHRASEFILE]
+               [-N IF:dhcp|IF:ADDR/MASK:GW]... [-6 IF:slaac|IF:ADDR6/LEN:GW6]...
+               [-D DNS]... [-W WIFIFILE] [-U] [-l ACCEPTFILE] -y [--progress]
+@SLUG@-install --capabilities
+```
+
+- `-p` the disk plan of the installer (JSON, version 1, mode 0600). On
+  DragonFly: mode `erase`, UEFI, layout `single` on one disk, filesystem
+  `hammer2` or `ufs`, `encryption` of the root (and of the swap) with
+  dm_crypt (LUKS), `swap_mb` (0: no swap), `wipe` `quick` or `secure`
+  (the whole disk overwritten with zeros), `usage` `together` or
+  `separate`, and `data` volumes: each one whole other disk (layout
+  `single`, `hammer2` or `ufs`) mounted at its mount point from fstab by
+  its own label (`/dev/part-by-label/<slug>-<name>-<8 hex>.a`). An
+  encrypted install takes no data volumes (DragonFly encrypts the system
+  disk only). Anything else is refused with the reason. `-d DISK` is the
+  plan that erases DISK with the defaults; a bare disk name (`vbd0`,
+  `da0`), never a path.
+- `--capabilities` prints what the command installs, one JSON object in
+  the shape of the installer-template adapter hook `os_layouts`
+  (`layouts`, `filesystems`, `modes`, `data_pools`, `boot`: `["uefi"]`,
+  `encryption`, `not_offered`), and changes nothing. The installer's
+  adapter asks the installed command first, so its Disk page offers only
+  this (UEFI shown as fixed text, no BIOS).
+- The disk of the running system (the live media) and every disk with a
+  mounted file system or swap is refused, also when it is mounted through
+  an alias (`part-by-label`).
+- `-H` a file of mode 0600 with the `$6$` hash of the password (DragonFly
+  `crypt(3)` takes SHA-512 crypt); the password never reaches the command.
+  `-r FILE` the same for root (otherwise root stays locked).
+- `-E` the passphrase of the encryption: one line, 8 to 1024 bytes, mode
+  0600. It is used without its end of line (the passphrase typed at boot
+  has none), from a copy in a directory of root that is removed after.
+  The encrypted root boots through the initrd of DragonFly
+  (`vfs.root.realroot="crypt:..."`), the encrypted swap through
+  `/etc/crypttab`, as the stock installer does it.
+- `-K` a syscons keymap: the consoles get it at the first boot, and X gets
+  the matching layout (`xorg.conf.d/00-keyboard.conf`). `-L` the locale
+  (the default class of `login.conf`), `-Z local` a hardware clock on
+  local time (`/etc/wall_cmos_clock`).
+- `-N` IPv4 per adapter, `-6` IPv6 (SLAAC or static), `-D` resolvers
+  (`resolv.conf` and `resolv.conf.head`), `-W` a Wi-Fi network (a JSON file
+  of mode 0600, written to `wpa_supplicant.conf` with the SSID and the PSK
+  as hex; WPA3 uses SAE). Without `-N` every wired adapter asks DHCP.
+- `-A` LightDM logs the user in by itself on the installed system (off by
+  default). `-P` doas without the password. `-U` updates the packages of
+  the installed system with `pkg` (a failure is reported, the system stays
+  installed).
+- `--progress` prints `PROGRESS <0-100> <message>` and `ERROR <message>`
+  on stdout and nothing else; the commands write into a log that goes to
+  `/var/log/` of the installed system (the file is named after the
+  command). No secret reaches the log.
+
+- `-l` the licensed software the user accepted on the Additional
+  software page (JSON of mode 0600: id, licence, sha256 of the licence
+  text, timestamp). Every id is checked against the catalogue of the
+  media, `/usr/local/share/@SLUG@/licensed-software.json`; only those
+  items are installed (`pkg`), and the file is kept as
+  `/var/db/@SLUG@/licenses-accepted.json`. Nothing is accepted
+  implicitly. The default set of this template needs no acceptance (X11,
+  Mesa, the GPU and video drivers, Xfce and LightDM are redistributable
+  with their notices), so the catalogue ships empty: a product adds its
+  items (id, name, description, size_mb, licence id and text path, the
+  flags non_commercial / vendor_key / vendor_download / needs_network,
+  install method `pkg` and the package names).
+
+It writes the layout of the stock installer for UEFI and HAMMER2: GPT
+with a 128 MiB EFI partition (the loader as `EFI/BOOT/BOOTX64.EFI`) and a
+DragonFly partition with a `disklabel64` of `/boot` (1 GiB UFS), swap
+(by default twice the memory, at most a tenth of the disk) and `/`
+(HAMMER2 or UFS, the rest); `/build` holds the null mounts of `/usr/obj` and `/var/{crash,
+cache,spool,log,tmp}`. The system is **the live root itself, copied** the
+way the stock installer copies it (the paths of
+`/usr/share/installer/sources.conf`, `X.hdd` in place of `X`): no second
+image of the system on the media, the file systems fill the disk as they
+are made (nothing has to grow), and the result is the installed system
+the stock installer makes. Then it removes the live session and every
+path of the installer's `MANIFEST` from the copy, writes `loader.conf`,
+`fstab`, the network and `/boot/firstboot-user.conf`, and exits 0 only
+when the EFI loader, the kernel and the root of the loader are in place.
+The DragonFly label of the disk gets a name of its own (the slug and 8
+random hex digits, for example `examplebsd-a60a411d`); devfs names its
+partitions `/dev/part-by-label/<name>.a`, `.b` and `.d`, and `fstab`, the
+loader (`vfs.root.mountfrom="hammer2:part-by-label/<name>.d"`),
+`crypttab` and `dumpdev` use those names. The installed system therefore
+boots whatever the disk is called on the next boot (installed as `vbd1`,
+booted alone as `vbd0`), unlike the device names the stock installer
+writes.
 
 For CI and test images, `build.sh` bakes the same configuration in:
 

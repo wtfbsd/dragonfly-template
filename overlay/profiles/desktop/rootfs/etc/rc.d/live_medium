@@ -1,0 +1,87 @@
+#!/bin/sh
+#
+# live_medium — the live media name the device they were started from in
+# /var/run/wtfbsd-live-medium, for the installer of installer-template.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The contract of installer-template (README, "The live medium"): a live
+# system writes, early at its start, a regular file of root that nobody
+# else can write, one line, the name of the device it was started from;
+# the installer follows that device to its disk and never offers it.
+#
+# The device is the one the root is mounted from (mount -p): on the .img
+# of the desktop that is /dev/part-by-label/<label>.a (the loader mounts
+# the root by its label), on the ISO the cd9660 device. Only the live
+# media write it (the installer account of the release tooling, as in
+# live_session); /var/run is emptied at every start, so the installed
+# system has none. The file is written next to its place and renamed over
+# it (a rename never follows a symbolic link).
+#
+# It runs after /var/run is cleaned and before the live session and the
+# login (LightDM and the installer start after LOGIN).
+
+# PROVIDE: live_medium
+# REQUIRE: mountcritlocal cleanvar
+# BEFORE: live_session LOGIN
+# KEYWORD: nojail
+
+. /etc/rc.subr
+
+name=live_medium
+rcvar=live_medium_enable
+
+: ${live_medium_enable:="YES"}
+# the root the files are found under; empty on a real system (the test
+# suite points it at a staged tree)
+: ${live_medium_root:=""}
+load_rc_config "$name"
+
+R=$live_medium_root
+MARKER=/var/run/wtfbsd-live-medium
+
+note() { # note <msg> — to the console and to syslog
+	echo "live_medium: $*"
+	logger -t live_medium "$*" 2> /dev/null || :
+}
+
+live_medium_start() {
+	local _dev _tmp
+
+	# the live media carry the installer account of the release tooling
+	grep -q '^installer:' "$R/etc/master.passwd" 2> /dev/null || return 0
+
+	_dev=$(mount -p 2> /dev/null | awk '$2 == "/" { d = $1 } END { print d }')
+	case $_dev in
+	/dev/*) ;;
+	*)
+		note "the device of the root is not a device ($_dev): $MARKER not written"
+		return 1
+		;;
+	esac
+	case $_dev in
+	*[!A-Za-z0-9/._@:-]*)
+		note "the name of the device of the root is not plain: $MARKER not written"
+		return 1
+		;;
+	esac
+
+	mkdir -p "$R/var/run" || return 1
+	if ! _tmp=$(mktemp "$R$MARKER.XXXXXXXX"); then
+		note "cannot create a file in /var/run: $MARKER not written"
+		return 1
+	fi
+	if ! printf '%s\n' "$_dev" > "$_tmp" || ! chmod 644 "$_tmp" ||
+		! mv -f "$_tmp" "$R$MARKER"; then
+		rm -f "$_tmp"
+		note "could not write $MARKER"
+		return 1
+	fi
+	note "the live medium is $_dev ($MARKER)"
+	return 0
+}
+
+start_cmd=live_medium_start
+stop_cmd=:
+
+run_rc_command "$1"

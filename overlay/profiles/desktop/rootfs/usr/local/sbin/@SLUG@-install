@@ -1,0 +1,1281 @@
+#!/bin/sh
+#
+# @SLUG@-install — install @DISTRO_NAME@ from the live media onto a disk,
+# without questions. The graphical installer (and its text front end)
+# call it; an operator can too.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# usage: @SLUG@-install -p PLANFILE | -d DISK  -u USER -H HASHFILE
+#                       [-c FULLNAME] [-P] [-A] [-k PUBKEYFILE] [-n HOSTNAME]
+#                       [-z TIMEZONE] [-Z utc|local] [-K KEYMAP] [-L LOCALE]
+#                       [-r locked|ROOTHASHFILE] [-E PASSPHRASEFILE]
+#                       [-N IF:dhcp|IF:ADDR/MASK:GW]... [-6 IF:slaac|IF:ADDR6/LEN:GW6]...
+#                       [-D DNS]... [-W WIFIFILE] [-U] -y [--progress]
+#
+#   -p PLANFILE    the disk plan of the installer (JSON, version 1, mode
+#                  0600). DragonFly takes: mode "erase", boot "uefi",
+#                  layout "single" on one disk, filesystem "hammer2" or
+#                  "ufs", encryption (dm_crypt, LUKS) of the root and of
+#                  the swap, swap_mb (0: no swap), wipe "quick" or
+#                  "secure" (the whole disk is overwritten with zeros).
+#                  Everything else the plan can say is refused.
+#   -d DISK        the same as a plan that erases DISK with the defaults
+#                  (a bare name: vbd0, da0, nvme0; never a path)
+#   -u USER        the account of the installed system (created at its
+#                  first boot, in the wheel group)
+#   -k PUBKEYFILE  authorized_keys lines for the account (optional)
+#   -H HASHFILE    a file of mode 0600 that holds the crypt(3) hash of the
+#                  password of the account ($6$...); the password itself
+#                  never reaches this command
+#   -n HOSTNAME    the host name of the installed system
+#   -z TIMEZONE    a zoneinfo name (Europe/Berlin, UTC, ...)
+#   -K KEYMAP      a syscons keymap (us.iso, de.iso, ...): the consoles of
+#                  the installed system get it, and X gets the matching
+#                  layout (/usr/local/etc/X11/xorg.conf.d/00-keyboard.conf)
+#   -c FULLNAME    the full name of the account (no colon)
+#   -P             the account may use doas without its password
+#   -N NET         the network of the installed system, repeatable:
+#                  IF:dhcp, or IF:ADDR/MASK:GW (MASK a dotted netmask
+#                  or a prefix length such as 24; an empty
+#                  GW gives no default route). Without -N every wired
+#                  adapter of the machine asks DHCP.
+#   -Z utc|local   the hardware clock (local writes /etc/wall_cmos_clock)
+#   -L LOCALE      the locale of the system (en_US.UTF-8, ...): the
+#                  default class of /etc/login.conf
+#   -r locked      root stays locked (the default); -r FILE: root gets the
+#                  crypt(3) hash of FILE (mode 0600), at the first boot
+#   -A             LightDM logs USER in by itself on the installed system
+#   -E FILE        the passphrase of the encryption (one line, mode 0600,
+#                  8 to 1024 bytes); required when the plan encrypts
+#   -6 NET         IPv6, repeatable: IF:slaac, or IF:ADDR6/PREFIXLEN:GW6
+#   -D DNS         a resolver (IPv4 or IPv6), repeatable
+#   -W FILE        a Wi-Fi network, JSON of mode 0600:
+#                  {"if":"iwn0","ssid":"...","security":"wpa2"|"wpa3"|"open","psk":"..."}
+#   -U             update the packages of the installed system (pkg)
+#   -l ACCEPTFILE  the licensed software the user accepted (JSON, mode
+#                  0600: [{"id", "licence", "sha256", "timestamp"}]):
+#                  every id must be an item of the catalogue of the media
+#                  (/usr/local/share/@SLUG@/licensed-software.json) with
+#                  that licence and the sha256 of its licence text. Only
+#                  those items are installed (pkg); the file is kept as
+#                  /var/db/@SLUG@/licenses-accepted.json
+#   -y             yes: erase DISK (without -y nothing is done)
+#   --progress     print "PROGRESS <0-100> <message>" lines on stdout, and
+#                  "ERROR <message>" before a non-zero exit; nothing else
+#                  goes to stdout (the commands write into the log)
+#
+# What it does (the layout of the stock DragonFly installer for UEFI and
+# HAMMER2, which is the layout of the installed systems of this template):
+#
+#   GPT on DISK:  s0  EFI system partition, 128 MiB, FAT32, the loader of
+#                     the live media as EFI/BOOT/BOOTX64.EFI
+#                 s1  DragonFly, disklabel64:
+#                       a  /boot  1 GiB UFS
+#                       b  swap   twice the memory, at most a tenth of
+#                                 the disk
+#                       d  /      HAMMER2, the rest of the disk
+#   /build on the root holds /usr/obj and /var/{crash,cache,spool,log,tmp},
+#   null-mounted from fstab; /tmp is a tmpfs.
+#
+# The system is the live root itself, copied the way the stock installer
+# copies it: every path of /usr/share/installer/sources.conf, and for a
+# path X whose X.hdd exists (/etc.hdd) X.hdd instead of X. The image of
+# the system is therefore not shipped twice on the live media, the disk
+# is filled as it is partitioned (nothing has to grow afterwards), and
+# the result is the installed system the stock installer makes. What the
+# live session added to the live root is then removed from the copy
+# (@SLUG@-live-clean): no live user, no automatic login, no installer
+# that opens by itself.
+#
+# The installer's MANIFEST (the installer itself) is removed from the
+# copy by @SLUG@-live-clean as well. The network (-N) and the keyboard
+# of X (-K) are written into the new system directly.
+#
+# The DragonFly label of the disk gets a name of its own (the slug and 8
+# random hex digits); fstab, the loader, crypttab and dumpdev name the
+# partitions /dev/part-by-label/<name>.a/.b/.d, so the installed system
+# boots whatever its disk is called after disks are added or removed.
+#
+# The account, the host name, the time zone and the keymap are written
+# into /boot/firstboot-user.conf of the installed system (mode 0600);
+# /etc/rc.d/firstboot_user applies them at its first boot.
+#
+# The disk that holds the running system (the live media), and every
+# disk with a mounted file system or active swap, is refused.
+#
+# The command exits 0 only when the disk is bootable (the EFI loader, the
+# kernel and the root of the loader are in place) and the configuration
+# of the first boot is written.
+#
+# Three environment variables exist for the test suite: INSTALL_SRC (the
+# root that is copied, default /), INSTALL_DEV (the device directory,
+# default /dev) and INSTALL_MNT (the directory the disk is mounted on,
+# default a new directory under TMPDIR).
+
+set -u
+umask 022
+
+PROG=${0##*/}
+PATH=$PATH:/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
+export PATH
+
+SRC=${INSTALL_SRC:-/}
+SRC=${SRC%/}
+DEV=${INSTALL_DEV:-/dev}
+DEV=${DEV%/}
+
+PMODE=0
+DISK=''
+PLANFILE=''
+FS=hammer2
+ENC=0
+ENCSWAP=0
+SWAP_PLAN=''
+WIPE=quick
+LOCALE_A=''
+CLOCK_A=''
+ROOT_A=''
+ROOTHASH=''
+AUTOLOGIN=0
+PASSFILE=''
+NETS6=''
+DNS_A=''
+WIFIFILE=''
+UPDATE=0
+ACCEPTFILE=''
+DATAVOLS=''
+DATAWIPES=''
+DATAFSTAB=''
+LICPKGS=''
+KEYDIR=''
+USERNAME=''
+KEYFILE=''
+HASHFILE=''
+HOSTNAME_A=''
+TZ_A=''
+KEYMAP_A=''
+FULLNAME_A=''
+NOPASS=0
+NETS=''
+YES=0
+
+LOG=''
+MNT=''
+MNT_MADE=0
+MOUNTED='' # the mount points, most recent first
+
+# --------------------------------------------------------------------------
+# output
+# --------------------------------------------------------------------------
+
+progress() { # progress <percent> <message>
+	if [ "$PMODE" -eq 1 ]; then
+		printf 'PROGRESS %d %s\n' "$1" "$2"
+	else
+		printf '%s: %s\n' "$PROG" "$2" >&2
+	fi
+	[ -n "$LOG" ] && printf '== %s\n' "$2" >> "$LOG"
+	return 0
+}
+
+fail() { # fail <message> — clean up, say why, exit 1
+	[ -n "$LOG" ] && printf 'ERROR %s\n' "$1" >> "$LOG"
+	cleanup
+	if [ "$PMODE" -eq 1 ]; then
+		printf 'ERROR %s\n' "$1"
+	fi
+	printf '%s: %s\n' "$PROG" "$1" >&2
+	[ -n "$LOG" ] && printf '%s: the log of the run: %s\n' "$PROG" "$LOG" >&2
+	exit 1
+}
+
+usage_fail() {
+	printf 'usage: %s -p PLANFILE | -d DISK -u USER -H HASHFILE [-c FULLNAME] [-P] [-A] [-k PUBKEYFILE] [-n HOSTNAME] [-z TIMEZONE] [-Z utc|local] [-K KEYMAP] [-L LOCALE] [-r locked|ROOTHASHFILE] [-E PASSPHRASEFILE] [-N IF:dhcp|IF:ADDR/MASK:GW]... [-6 IF:slaac|IF:ADDR6/LEN:GW6]... [-D DNS]... [-W WIFIFILE] [-U] [-l ACCEPTFILE] -y [--progress]\n' "$PROG" >&2
+	fail "$1"
+}
+
+run() { # run <command...> — the command writes into the log; a failure stops the install
+	printf '+ %s\n' "$*" >> "$LOG"
+	"$@" >> "$LOG" 2>&1 || fail "the command failed: $* (see $LOG)"
+}
+
+# --------------------------------------------------------------------------
+# cleanup: everything that was mounted is unmounted
+# --------------------------------------------------------------------------
+
+cleanup() {
+	for _m in $MOUNTED; do
+		umount "$_m" >> "${LOG:-/dev/null}" 2>&1 || umount -f "$_m" >> "${LOG:-/dev/null}" 2>&1 || :
+	done
+	MOUNTED=''
+	if [ -n "${MAPPED:-}" ]; then
+		for _mp in $MAPPED; do
+			cryptsetup luksClose "$_mp" >> "${LOG:-/dev/null}" 2>&1 || :
+		done
+		MAPPED=''
+	fi
+	if [ -n "$KEYDIR" ]; then
+		rm -rf "$KEYDIR"
+		KEYDIR=''
+	fi
+	if [ "$MNT_MADE" -eq 1 ] && [ -n "$MNT" ]; then
+		rmdir "$MNT" 2> /dev/null || :
+	fi
+	return 0
+}
+
+trap 'fail "interrupted"' HUP INT TERM
+
+mounted() { # mounted <mountpoint> — remember it for the cleanup
+	MOUNTED="$1 $MOUNTED"
+}
+
+# --------------------------------------------------------------------------
+# the arguments
+# --------------------------------------------------------------------------
+
+_n=$#
+while [ "$_n" -gt 0 ]; do
+	_a=$1
+	shift
+	_n=$((_n - 1))
+	case $_a in
+	--progress) PMODE=1 ;;
+	--capabilities)
+		# what this command installs, in the shape of the adapter hook
+		# os_layouts of installer-template (layouts, filesystems, modes,
+		# data_pools, boot, usages, encryption, swap_encryption,
+		# not_offered; no home_encryption: DragonFly encrypts the system
+		# disk only): its adapter asks the
+		# installed command first, and the Disk page offers only these
+		printf '%s\n' '{"modes": ["erase"], "boot": ["uefi"], "layouts": [{"ident": "single", "title": "Single disk", "min_disks": 1, "max_disks": 1}], "filesystems": [["hammer2", "HAMMER2"], ["ufs", "UFS"]], "data_pools": true, "usages": ["together", "separate"], "encryption": "dm_crypt (LUKS)", "swap_encryption": true, "not_offered": "not offered on DragonFly"}'
+		exit 0
+		;;
+	*) set -- "$@" "$_a" ;;
+	esac
+done
+
+while getopts 'd:p:u:k:H:n:z:Z:K:L:c:PAr:E:N:6:D:W:Ul:yh' _o; do
+	case $_o in
+	d) DISK=$OPTARG ;;
+	p) PLANFILE=$OPTARG ;;
+	Z) CLOCK_A=$OPTARG ;;
+	L) LOCALE_A=$OPTARG ;;
+	A) AUTOLOGIN=1 ;;
+	r) ROOT_A=$OPTARG ;;
+	E) PASSFILE=$OPTARG ;;
+	6) NETS6="$NETS6 $OPTARG" ;;
+	D) DNS_A="$DNS_A $OPTARG" ;;
+	W) WIFIFILE=$OPTARG ;;
+	U) UPDATE=1 ;;
+	l) ACCEPTFILE=$OPTARG ;;
+	u) USERNAME=$OPTARG ;;
+	k) KEYFILE=$OPTARG ;;
+	H) HASHFILE=$OPTARG ;;
+	n) HOSTNAME_A=$OPTARG ;;
+	z) TZ_A=$OPTARG ;;
+	K) KEYMAP_A=$OPTARG ;;
+	c) FULLNAME_A=$OPTARG ;;
+	P) NOPASS=1 ;;
+	N) NETS="$NETS $OPTARG" ;;
+	y) YES=1 ;;
+	h) usage_fail 'help asked for: nothing was done' ;;
+	*) usage_fail 'unknown option: nothing was done' ;;
+	esac
+done
+shift $((OPTIND - 1))
+[ $# -eq 0 ] || usage_fail "unexpected argument: $1"
+
+LOG=$(mktemp "${TMPDIR:-/tmp}/$PROG.log.XXXXXX") || {
+	LOG=''
+	fail "cannot create the log file in ${TMPDIR:-/tmp}"
+}
+chmod 600 "$LOG"
+
+progress 1 'checking the answers'
+
+matches() { # matches <ERE> <value>
+	printf '%s\n' "$2" | grep -Eq -- "$1"
+}
+
+[ "$(id -u)" = 0 ] || [ "${INSTALL_TEST_ALLOW_NONROOT:-0}" = 1 ] ||
+	fail 'the install must run as root'
+[ "$YES" -eq 1 ] || usage_fail "-y is required: it says that every partition of the disk may be erased; nothing was done"
+[ -n "$DISK" ] || [ -n "$PLANFILE" ] || usage_fail '-p PLANFILE or -d DISK is required'
+[ -z "$DISK" ] || [ -z "$PLANFILE" ] || usage_fail '-p and -d exclude each other: the plan names the disk'
+[ -n "$USERNAME" ] || usage_fail '-u USER is required'
+[ -n "$HASHFILE" ] || usage_fail '-H HASHFILE is required'
+
+# secret_file <option> <file> <max bytes> — a regular file (not a link) of
+# its owner only (mode 0600 or stricter), at most <max bytes> long
+secret_file() {
+	[ ! -L "$2" ] && [ -f "$2" ] && [ -r "$2" ] || fail "$1: no readable regular file: $2"
+	case $(ls -ln "$2" | awk '{ print $1 }') in
+	-??????---) ;;
+	*) fail "$1: the file must be readable by its owner only (mode 0600): $2" ;;
+	esac
+	[ "$(wc -c < "$2" | tr -d ' ')" -le "$3" ] || fail "$1: the file is larger than $3 bytes: $2"
+}
+
+PY=''
+need_python() {
+	[ -n "$PY" ] && return 0
+	PY=$(command -v python3 2> /dev/null || command -v python3.11 2> /dev/null) ||
+		fail "$1 needs python3, which the live media carry with the installer"
+}
+
+# the disk plan: checked by python3 (JSON), handed back as KEY=value lines
+if [ -n "$PLANFILE" ]; then
+	secret_file -p "$PLANFILE" 65536
+	need_python -p
+	_plan=$("$PY" -I - "$PLANFILE" <<'EOF_PLAN'
+import json, re, sys
+def bad(m):
+    print("ERROR " + m); sys.exit(0)
+try:
+    p = json.load(open(sys.argv[1]))
+except Exception as e:
+    bad("the plan is not JSON")
+if not isinstance(p, dict): bad("the plan is not a JSON object")
+known = {"version", "mode", "boot", "disks", "layout", "filesystem", "encryption",
+         "swap_mb", "sector_4k", "trim", "wipe", "confirm_foreign", "alongside",
+         "partitions", "data", "usage"}
+for k in p:
+    if k not in known: bad("the plan holds an unknown key: %s" % re.sub(r"[^A-Za-z0-9_]", "?", str(k))[:40])
+if p.get("version") != 1: bad("the plan must be version 1")
+if p.get("mode", "erase") != "erase":
+    bad("DragonFly installs in mode erase only (alongside and manual are not offered)")
+if p.get("boot", "uefi") != "uefi": bad("DragonFly installs with UEFI boot only")
+d = p.get("disks")
+if not isinstance(d, list) or len(d) != 1: bad("DragonFly installs on exactly one disk")
+if not isinstance(d[0], str) or not re.fullmatch(r"[a-z]+[0-9]+", d[0]): bad("the disk of the plan is not a bare disk name")
+if p.get("layout", "single") != "single": bad("DragonFly offers the layout single only")
+fs = p.get("filesystem", "hammer2")
+if fs not in ("hammer2", "ufs"): bad("DragonFly offers the filesystems hammer2 and ufs")
+if p.get("partitions") or p.get("alongside"): bad("DragonFly takes no partitions or alongside in mode erase")
+if p.get("usage", "together") not in ("together", "separate"): bad("usage is together or separate")
+data = p.get("data") or []
+if not isinstance(data, list): bad("data is not a list")
+seen = set(d)
+for v in data:
+    if not isinstance(v, dict) or set(v) - {"name", "disks", "layout", "filesystem", "mount"}: bad("a data volume of the plan is not valid")
+    n = v.get("name")
+    if not isinstance(n, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", n): bad("the name of a data volume is not valid")
+    vd = v.get("disks")
+    if not isinstance(vd, list) or len(vd) != 1 or not isinstance(vd[0], str) or not re.fullmatch(r"[a-z]+[0-9]+", vd[0]):
+        bad("a data volume of DragonFly is one whole disk (layout single)")
+    if v.get("layout", "single") != "single": bad("DragonFly offers the layout single for data volumes")
+    if vd[0] in seen: bad("a disk appears twice in the plan")
+    seen.add(vd[0])
+    vf = v.get("filesystem", "hammer2")
+    if vf not in ("hammer2", "ufs"): bad("DragonFly offers the filesystems hammer2 and ufs")
+    m = v.get("mount")
+    if not isinstance(m, str) or not re.fullmatch(r"/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*", m) or ".." in m.split("/") or m in ("/", "/boot", "/tmp", "/proc", "/dev"):
+        bad("the mount point of a data volume is not valid")
+    print("DATA=%s|%s|%s|%s" % (n, vd[0], vf, m))
+e = p.get("encryption", {"enabled": False})
+if not isinstance(e, dict) or set(e) - {"enabled", "swap"}: bad("the encryption of the plan is not valid")
+en = e.get("enabled", False) is True
+es = e.get("swap", False) is True
+sw = p.get("swap_mb", None)
+if sw is not None and (not isinstance(sw, int) or isinstance(sw, bool) or sw < 0 or sw > 1048576): bad("swap_mb must be 0 to 1048576")
+if es and (not en): bad("the swap is encrypted only with the root")
+if es and sw == 0: bad("an encrypted swap needs swap_mb > 0")
+w = p.get("wipe", {})
+if not isinstance(w, dict) or set(w) - seen: bad("wipe names a disk that is not a disk of the plan")
+if any(x not in ("quick", "secure") for x in w.values()): bad("wipe is quick or secure")
+wd = w.get(d[0], "quick")
+for k, x in w.items():
+    if k != d[0]: print("DATAWIPE=%s|%s" % (k, x))
+cf = p.get("confirm_foreign", [])
+if not isinstance(cf, list) or any(x not in seen for x in cf): bad("confirm_foreign names a disk that is not a disk of the plan")
+if en and data: bad("DragonFly encrypts the system disk only: an encrypted install takes no data volumes")
+for k in ("sector_4k", "trim"):
+    if k in p and not isinstance(p[k], bool): bad("%s must be true or false" % k)
+print("DISK=" + d[0]); print("FS=" + fs); print("ENC=%d" % en); print("ENCSWAP=%d" % es)
+print("SWAP=" + ("" if sw is None else str(sw))); print("WIPE=" + wd)
+EOF_PLAN
+) || fail '-p: the plan could not be read'
+	while IFS= read -r _l; do
+		case $_l in
+		'ERROR '*) fail "-p: ${_l#ERROR }" ;;
+		DISK=*) DISK=${_l#DISK=} ;;
+		FS=*) FS=${_l#FS=} ;;
+		ENC=*) ENC=${_l#ENC=} ;;
+		ENCSWAP=*) ENCSWAP=${_l#ENCSWAP=} ;;
+		SWAP=*) SWAP_PLAN=${_l#SWAP=} ;;
+		WIPE=*) WIPE=${_l#WIPE=} ;;
+		DATA=*) DATAVOLS="$DATAVOLS ${_l#DATA=}" ;;
+		DATAWIPE=*) DATAWIPES="$DATAWIPES ${_l#DATAWIPE=}" ;;
+		esac
+	done <<EOF_PL
+$_plan
+EOF_PL
+	[ -n "$DISK" ] || fail '-p: the plan names no disk'
+fi
+
+matches '^[a-z]+[0-9]+$' "$DISK" ||
+	fail "-d must be a bare name of a whole disk such as vbd0 or da0, never a path (got: $DISK)"
+matches '^[a-z_][a-z0-9_-]{0,31}$' "$USERNAME" ||
+	fail "-u must match ^[a-z_][a-z0-9_-]{0,31}\$ (got: $USERNAME)"
+for _sys in live installer; do
+	[ "$USERNAME" != "$_sys" ] || fail "-u $USERNAME is reserved for the live media"
+done
+_sysdb="$SRC/etc.hdd/master.passwd"
+[ -f "$_sysdb" ] || _sysdb="$SRC/etc/master.passwd"
+if [ -f "$_sysdb" ] && awk -F: -v u="$USERNAME" '$1 == u { f = 1 } END { exit !f }' "$_sysdb"; then
+	fail "-u $USERNAME is an account of the system itself; choose another name"
+fi
+
+[ -f "$HASHFILE" ] && [ -r "$HASHFILE" ] || fail "no readable hash file: $HASHFILE"
+_perm=$(ls -ln "$HASHFILE" | awk '{ print $1 }')
+case $_perm in
+-??????---) ;;
+*) fail "the hash file must be readable by its owner only (mode 0600): $HASHFILE" ;;
+esac
+HASH=$(sed -e 's/[[:space:]]*$//' "$HASHFILE" | grep -v '^$' | head -1)
+case $HASH in
+'$6$'* | '$5$'* | '$2b$'* | '$2y$'*) ;;
+*) fail "the hash file does not hold a crypt(3) hash (\$6\$...): $HASHFILE" ;;
+esac
+case $HASH in
+*[[:space:]:]*) fail "the hash in $HASHFILE holds a space or a colon" ;;
+esac
+
+KEYS=''
+if [ -n "$KEYFILE" ]; then
+	[ -f "$KEYFILE" ] && [ -r "$KEYFILE" ] || fail "no readable key file: $KEYFILE"
+	_oss='@openssh.com'
+	while IFS= read -r _k || [ -n "$_k" ]; do
+		case $_k in '' | '#'*) continue ;; esac
+		case $_k in
+		ssh-ed25519\ * | ssh-rsa\ * | ecdsa-sha2-nistp256\ * | ecdsa-sha2-nistp384\ * | ecdsa-sha2-nistp521\ * | sk-ssh-ed25519"$_oss"\ * | sk-ecdsa-sha2-nistp256"$_oss"\ *) ;;
+		*) fail "the key file holds a line that is not an authorized_keys line of a known key type: $KEYFILE" ;;
+		esac
+		KEYS="$KEYS
+SSH_KEY=$_k"
+	done < "$KEYFILE"
+fi
+
+if [ -n "$HOSTNAME_A" ]; then
+	matches '^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$' "$HOSTNAME_A" ||
+		fail "-n is not a host name (letters, digits, hyphens and dots): $HOSTNAME_A"
+fi
+if [ -n "$TZ_A" ]; then
+	matches '^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$' "$TZ_A" ||
+		fail "-z is not a zoneinfo name: $TZ_A"
+	[ -f "$SRC/usr/share/zoneinfo/$TZ_A" ] || fail "-z: no such time zone: $TZ_A"
+fi
+if [ -n "$KEYMAP_A" ]; then
+	KEYMAP_A=${KEYMAP_A%.kbd}
+	matches '^[A-Za-z0-9._-]+$' "$KEYMAP_A" || fail "-K is not a keymap name: $KEYMAP_A"
+	[ -f "$SRC/usr/share/syscons/keymaps/$KEYMAP_A.kbd" ] || fail "-K: no such keymap: $KEYMAP_A"
+fi
+
+if [ -n "$FULLNAME_A" ]; then
+	case $FULLNAME_A in
+	*:* | *[[:cntrl:]]*) fail "-c may not hold a colon or a control character" ;;
+	esac
+fi
+
+# the encryption passphrase: one line, 8 to 1024 bytes, no NUL
+if [ "$ENC" -eq 1 ]; then
+	[ -n "$PASSFILE" ] || fail '-E PASSPHRASEFILE is required: the plan encrypts the disk'
+	secret_file -E "$PASSFILE" 1025
+	_pl=$(tr -d '\n' < "$PASSFILE" | wc -c | tr -d ' ')
+	[ "$_pl" -ge 8 ] && [ "$_pl" -le 1024 ] || fail '-E: the passphrase must be 8 to 1024 bytes'
+	[ "$(tr -d '\000' < "$PASSFILE" | wc -c)" -eq "$(wc -c < "$PASSFILE")" ] || fail '-E: the passphrase holds a NUL byte'
+	[ "$(grep -c '' "$PASSFILE")" -le 1 ] || fail '-E: the passphrase must be one line'
+elif [ -n "$PASSFILE" ]; then
+	fail '-E is given but the plan does not encrypt the disk'
+fi
+
+case $CLOCK_A in
+'' | utc | local) ;;
+*) fail "-Z must be utc or local (got: $CLOCK_A)" ;;
+esac
+
+if [ -n "$LOCALE_A" ]; then
+	matches '^[A-Za-z]{2,3}(_[A-Z]{2})?(\.[A-Za-z0-9-]+)?(@[a-z]+)?$' "$LOCALE_A" ||
+		fail "-L is not a locale name: $LOCALE_A"
+	[ -d "$SRC/usr/share/locale/$LOCALE_A" ] || fail "-L: no such locale: $LOCALE_A"
+fi
+
+case $ROOT_A in
+'' | locked) ;;
+*)
+	secret_file -r "$ROOT_A" 4096
+	ROOTHASH=$(sed -e 's/[[:space:]]*$//' "$ROOT_A" | grep -v '^$' | head -1)
+	case $ROOTHASH in
+	'$6$'*) ;;
+	*) fail '-r: the file does not hold a $6$ crypt(3) hash' ;;
+	esac
+	case $ROOTHASH in
+	*[[:space:]:]*) fail '-r: the hash holds a space or a colon' ;;
+	esac
+	;;
+esac
+
+# ip_check <4|6|any> <value> — an IPv4 or IPv6 address (python3 parses it)
+ip_check() {
+	need_python "an IPv6 address or a resolver"
+	"$PY" -I -c '
+import ipaddress, sys
+try:
+    a = ipaddress.ip_address(sys.argv[2])
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if sys.argv[1] == "any" or str(a.version) == sys.argv[1] else 1)' "$1" "$2"
+}
+
+NETCONF6=''
+for _net in $NETS6; do
+	_if=${_net%%:*}
+	_rest=${_net#*:}
+	matches '^[a-z][a-z0-9]{0,14}$' "$_if" || fail "-6: not a network adapter name: $_if"
+	if [ "$_rest" = slaac ]; then
+		NETCONF6="$NETCONF6
+ifconfig_${_if}_ipv6=\"inet6 accept_rtadv\"
+rtsold_enable=\"YES\""
+		continue
+	fi
+	_ap=${_rest%%/*}
+	_lg=${_rest#*/}
+	[ "$_lg" != "$_rest" ] || fail "-6 must be IF:slaac or IF:ADDR6/PREFIXLEN:GW6 (got: $_net)"
+	_len=${_lg%%:*}
+	_gw6=${_lg#*:}
+	[ "$_gw6" != "$_lg" ] || fail "-6 must be IF:slaac or IF:ADDR6/PREFIXLEN:GW6 (got: $_net)"
+	ip_check 6 "$_ap" || fail "-6: not an IPv6 address: $_ap"
+	matches '^[0-9]{1,3}$' "$_len" && [ "$_len" -ge 1 ] && [ "$_len" -le 128 ] || fail "-6: not a prefix length: $_len"
+	NETCONF6="$NETCONF6
+ifconfig_${_if}_ipv6=\"inet6 $_ap prefixlen $_len\""
+	if [ -n "$_gw6" ]; then
+		ip_check 6 "$_gw6" || fail "-6: not an IPv6 gateway: $_gw6"
+		NETCONF6="$NETCONF6
+ipv6_defaultrouter=\"$_gw6\""
+	fi
+done
+for _dns in $DNS_A; do
+	ip_check any "$_dns" || fail "-D: not an IP address: $_dns"
+done
+
+# the Wi-Fi network: checked by python3, turned into the lines of
+# wpa_supplicant.conf (the SSID and the PSK as hex: no quoting at all;
+# WPA3 (SAE) takes the passphrase itself, which may not hold a quote)
+WIFI_IF=''
+WIFI_NET=''
+if [ -n "$WIFIFILE" ]; then
+	secret_file -W "$WIFIFILE" 4096
+	need_python -W
+	_wifi=$("$PY" -I - "$WIFIFILE" <<'EOF_WIFI'
+import hashlib, json, re, sys
+def bad(m):
+    print("ERROR " + m); sys.exit(0)
+try:
+    w = json.load(open(sys.argv[1]))
+except Exception:
+    bad("the Wi-Fi file is not JSON")
+if not isinstance(w, dict) or set(w) - {"if", "ssid", "security", "psk"}: bad("the Wi-Fi file holds an unknown key")
+i = w.get("if", "")
+if not isinstance(i, str) or not re.fullmatch(r"[a-z][a-z0-9]{0,14}", i): bad("the Wi-Fi adapter name is not valid")
+ssid = w.get("ssid", "")
+if not isinstance(ssid, str): bad("the SSID is not text")
+sb = ssid.encode()
+if not 1 <= len(sb) <= 32: bad("the SSID must be 1 to 32 bytes")
+sec = w.get("security", "")
+if sec not in ("wpa2", "wpa3", "open"): bad("security is wpa2, wpa3 or open")
+psk = w.get("psk", "")
+print("IF=" + i)
+print("NET=ssid=" + sb.hex())
+if sec == "open":
+    print("NET=key_mgmt=NONE")
+else:
+    if not isinstance(psk, str): bad("the PSK is not text")
+    if re.fullmatch(r"[0-9A-Fa-f]{64}", psk):
+        hexpsk = psk.lower()
+    elif 8 <= len(psk) <= 63 and all(32 <= ord(c) < 127 for c in psk):
+        hexpsk = hashlib.pbkdf2_hmac("sha1", psk.encode(), sb, 4096, 32).hex()
+    else:
+        bad("the PSK must be 8 to 63 printable characters or 64 hex digits")
+    if sec == "wpa2":
+        print("NET=key_mgmt=WPA-PSK"); print("NET=psk=" + hexpsk)
+    else:
+        if '"' in psk or "\\" in psk or re.fullmatch(r"[0-9A-Fa-f]{64}", psk):
+            bad("a WPA3 passphrase may not hold a quote or a backslash, and is not given as hex")
+        print("NET=key_mgmt=SAE"); print('NET=sae_password="%s"' % psk); print("NET=ieee80211w=2")
+EOF_WIFI
+) || fail '-W: the Wi-Fi file could not be read'
+	while IFS= read -r _l; do
+		case $_l in
+		'ERROR '*) fail "-W: ${_l#ERROR }" ;;
+		IF=*) WIFI_IF=${_l#IF=} ;;
+		NET=*) WIFI_NET="$WIFI_NET
+	${_l#NET=}" ;;
+		esac
+	done <<EOF_WF
+$_wifi
+EOF_WF
+	[ -n "$WIFI_IF" ] || fail '-W: the Wi-Fi file names no adapter'
+fi
+
+# the licensed software the user accepted: every id is checked against
+# the catalogue of the media (the licence and the sha256 of its text);
+# the packages of the accepted items are installed, nothing else
+if [ -n "$ACCEPTFILE" ]; then
+	secret_file -l "$ACCEPTFILE" 65536
+	need_python -l
+	_lic=$("$PY" -I - "$ACCEPTFILE" "$SRC" "$SRC/usr/local/share/@SLUG@/licensed-software.json" <<'EOF_LIC'
+import hashlib, json, os, re, sys
+def bad(m):
+    print("ERROR " + m); sys.exit(0)
+try:
+    acc = json.load(open(sys.argv[1]))
+except Exception:
+    bad("the accept file is not JSON")
+try:
+    cat = json.load(open(sys.argv[3]))
+except Exception:
+    bad("the media have no readable catalogue of licensed software")
+items = {i.get("id"): i for i in cat.get("items", []) if isinstance(i, dict)}
+if not isinstance(acc, list): bad("the accept file is not a list")
+seen = set()
+for a in acc:
+    if not isinstance(a, dict) or set(a) - {"id", "licence", "sha256", "timestamp"}: bad("an entry of the accept file is not valid")
+    i = a.get("id")
+    if not isinstance(i, str) or i not in items: bad("an accepted id is not in the catalogue of the media")
+    if i in seen: bad("an id is accepted twice")
+    seen.add(i)
+    lic = items[i].get("licence", {})
+    if a.get("licence") != lic.get("id"): bad("the licence of %s is not the one of the catalogue" % i)
+    path = lic.get("text", "")
+    if not isinstance(path, str) or not path.startswith("/") or ".." in path: bad("the catalogue names no licence text for %s" % i)
+    try:
+        h = hashlib.sha256(open(sys.argv[2] + path, "rb").read()).hexdigest()
+    except OSError:
+        bad("the licence text of %s is not on the media" % i)
+    if a.get("sha256") != h: bad("the licence text accepted for %s is not the one on the media" % i)
+    inst = items[i].get("install", {})
+    if inst.get("method") != "pkg": bad("the install method of %s is not offered on DragonFly" % i)
+    for p in inst.get("packages", []):
+        if not isinstance(p, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", p): bad("a package name of %s is not valid" % i)
+        print("PKG=" + p)
+EOF_LIC
+) || fail '-l: the accept file could not be read'
+	while IFS= read -r _l; do
+		case $_l in
+		'ERROR '*) fail "-l: ${_l#ERROR }" ;;
+		PKG=*) LICPKGS="$LICPKGS ${_l#PKG=}" ;;
+		esac
+	done <<EOF_LC
+$_lic
+EOF_LC
+fi
+
+# ipv4 <value> — a dotted quad
+ipv4() {
+	matches '^([0-9]{1,3}\.){3}[0-9]{1,3}$' "$1" || return 1
+	_ip_ok=$(printf '%s\n' "$1" | awk -F. '{ for (i = 1; i <= 4; i++) if ($i > 255) { print "no"; exit } print "yes" }')
+	[ "$_ip_ok" = yes ]
+}
+# the -N answers: checked now, written into rc.conf of the new system
+NETCONF=''
+for _net in $NETS; do
+	_if=${_net%%:*}
+	_rest=${_net#*:}
+	matches '^[a-z][a-z0-9]*[0-9]+$' "$_if" || fail "-N: not a network adapter name: $_if"
+	if [ "$_rest" = dhcp ]; then
+		NETCONF="$NETCONF
+ifconfig_$_if=\"DHCP\""
+		continue
+	fi
+	_am=${_rest%%:*}
+	_gw=${_rest#*:}
+	[ "$_gw" != "$_rest" ] || fail "-N must be IF:dhcp or IF:ADDR/MASK:GW (got: $_net)"
+	_addr=${_am%%/*}
+	_mask=${_am#*/}
+	[ "$_mask" != "$_am" ] || fail "-N: the address needs a /MASK (got: $_net)"
+	ipv4 "$_addr" || fail "-N: not an IPv4 address: $_addr"
+	if matches '^[0-9]+$' "$_mask"; then
+		[ "$_mask" -ge 0 ] && [ "$_mask" -le 32 ] || fail "-N: not a prefix length: $_mask"
+		NETCONF="$NETCONF
+ifconfig_$_if=\"inet $_addr/$_mask\""
+	else
+		ipv4 "$_mask" || fail "-N: not a netmask: $_mask"
+		NETCONF="$NETCONF
+ifconfig_$_if=\"inet $_addr netmask $_mask\""
+	fi
+	if [ -n "$_gw" ]; then
+		ipv4 "$_gw" || fail "-N: not an IPv4 gateway: $_gw"
+		NETCONF="$NETCONF
+defaultrouter=\"$_gw\""
+	fi
+done
+if [ -z "$NETS" ]; then
+	# DHCP on every wired adapter of the machine
+	for _if in $(ifconfig -l 2> /dev/null); do
+		case $_if in
+		lo* | wlan* | pflog* | pfsync* | faith* | tun* | tap* | bridge* | vlan* | gif* | stf* | carp* | lagg* | ppp* | sl* | enc*) continue ;;
+		esac
+		matches '^[a-z][a-z0-9]*[0-9]+$' "$_if" || continue
+		NETCONF="$NETCONF
+ifconfig_$_if=\"DHCP\""
+	done
+fi
+
+# xkb_layout <syscons keymap> — the X layout (and variant) of a keymap of
+# /usr/share/syscons/keymaps: the part before the first dot, with the
+# names syscons uses for some of them
+xkb_layout() {
+	_xk=${1%%.*}
+	_xv=''
+	case $1 in *dvorak*) _xv=dvorak ;; *colemak*) _xv=colemak ;; esac
+	case $_xk in
+	uk) _xk=gb ;;
+	german) _xk=de ;;
+	spanish) _xk=es ;;
+	swedish) _xk=se ;;
+	danish) _xk=dk ;;
+	norwegian) _xk=no ;;
+	finnish) _xk=fi ;;
+	swissgerman | swissfrench) _xk=ch ;;
+	icelandic) _xk=is ;;
+	hungarian) _xk=hu ;;
+	jp106* | jp) _xk=jp ;;
+	br275* | br) _xk=br ;;
+	el) _xk=gr ;;
+	esperanto) _xk=epo ;;
+	esac
+	matches '^[a-z]{2,3}$' "$_xk" || _xk=us
+	printf '%s %s\n' "$_xk" "$_xv"
+}
+
+# --------------------------------------------------------------------------
+# the disk: a disk of the machine, and not one that is in use
+# --------------------------------------------------------------------------
+
+progress 2 "checking the disk $DISK"
+
+case " $(sysctl -n kern.disks 2> /dev/null) " in
+*" $DISK "*) ;;
+*) fail "$DISK is not a disk of this machine (kern.disks: $(sysctl -n kern.disks 2> /dev/null))" ;;
+esac
+[ -e "$DEV/$DISK" ] || fail "no such device: $DEV/$DISK"
+
+# rdev <path> — the device number of a device node (symbolic links and
+# the aliases of devfs, part-by-label and serno, name the same number)
+rdev() {
+	stat -L -f %r "$1" 2> /dev/null
+}
+
+# in_use_devices — the devices of the mounted file systems and of the
+# active swap, one per line
+in_use_devices() {
+	mount -p 2> /dev/null | awk '{ print $1 }'
+	swapctl -l 2> /dev/null | awk 'NR > 1 && $1 ~ /^\// { print $1 }'
+}
+
+disk_busy_reason() { # disk_busy_reason <disk> — prints the device that makes the disk busy
+	_db_nums=''
+	for _db_n in "$DEV/$1" "$DEV/$1"s*; do
+		[ -e "$_db_n" ] || continue
+		_db_r=$(rdev "$_db_n") && [ -n "$_db_r" ] && _db_nums="$_db_nums $_db_r"
+	done
+	in_use_devices | while IFS= read -r _db_d; do
+		case $_db_d in
+		/dev/*) _db_d=${_db_d#/dev/}; _db_p=$DEV/$_db_d ;;
+		/*) continue ;; # a null mount or a directory
+		*) _db_p=$DEV/$_db_d ;;
+		esac
+		_db_d=${_db_d%%@*}
+		_db_p=${_db_p%%@*}
+		_db_base=$(printf '%s\n' "$_db_d" | sed -E 's/s[0-9]+[a-p]?$//')
+		if [ "$_db_base" = "$1" ]; then
+			printf '%s\n' "$_db_d"
+			break
+		fi
+		[ -e "$_db_p" ] || continue
+		_db_r=$(rdev "$_db_p") || continue
+		[ -n "$_db_r" ] || continue
+		case " $_db_nums " in
+		*" $_db_r "*)
+			printf '%s\n' "$_db_d"
+			break
+			;;
+		esac
+	done
+}
+
+_busy=$(disk_busy_reason "$DISK")
+[ -z "$_busy" ] ||
+	fail "$DISK is in use ($_busy is mounted or is swap): it holds the running system (the live media) or a file system in use; choose another disk"
+
+[ -f "$SRC/boot/boot1.efi" ] || fail "the live root has no EFI loader: $SRC/boot/boot1.efi"
+[ -f "$SRC/boot/kernel/kernel" ] || fail "the live root has no kernel: $SRC/boot/kernel/kernel"
+[ -x "$SRC/usr/local/sbin/@SLUG@-live-clean" ] || fail "missing $SRC/usr/local/sbin/@SLUG@-live-clean"
+if [ "$ENC" -eq 1 ]; then
+	[ -f "$SRC/boot/kernel/initrd.img.gz" ] || [ -f "$SRC/boot/kernel/initrd.img" ] ||
+		fail 'an encrypted root needs the initrd of DragonFly (/boot/kernel/initrd.img.gz), which the live root does not have'
+	command -v cryptsetup > /dev/null 2>&1 || fail 'an encrypted root needs cryptsetup'
+fi
+
+# --------------------------------------------------------------------------
+# the partitions
+# --------------------------------------------------------------------------
+
+if [ "$WIPE" = secure ]; then
+	progress 3 "overwriting all of $DISK with zeros (this takes a while)"
+	printf '+ dd if=/dev/zero of=%s bs=1m\n' "$DEV/$DISK" >> "$LOG"
+	# dd ends with "end of device" on a whole disk: that is the success
+	dd if=/dev/zero of="$DEV/$DISK" bs=1m >> "$LOG" 2>&1 || :
+fi
+progress 4 "erasing $DISK and writing the partition table"
+run dd if=/dev/zero of="$DEV/$DISK" bs=32k count=16
+gpt destroy "$DISK" >> "$LOG" 2>&1 || : # a blank disk has no table to destroy
+run gpt create -f "$DISK"
+run gpt add -i 0 -s 262144 -t efi "$DISK"
+run gpt add -i 1 -t dragonfly "$DISK"
+
+# the size of the DragonFly partition, from the table that was written
+_sectors=$(gpt show "$DISK" 2>> "$LOG" | awk '$3 == "1" && $4 == "GPT" { print $2; exit }')
+matches '^[0-9]+$' "${_sectors:-x}" || fail "cannot read the size of ${DISK}s1 from the partition table"
+CAP_MB=$((_sectors / 2048))
+_mem=$(sysctl -n hw.physmem 2> /dev/null)
+matches '^[0-9]+$' "${_mem:-x}" || _mem=1073741824
+MEM_MB=$((_mem / 1048576))
+SWAP_MB=$((MEM_MB * 2))
+[ "$SWAP_MB" -le $((CAP_MB / 10)) ] || SWAP_MB=$((CAP_MB / 10))
+[ "$SWAP_MB" -ge 256 ] || SWAP_MB=256
+[ -z "$SWAP_PLAN" ] || SWAP_MB=$SWAP_PLAN
+BOOT_MB=1024
+ROOT_MB=$((CAP_MB - BOOT_MB - SWAP_MB))
+[ "$ROOT_MB" -ge 8192 ] ||
+	fail "$DISK is too small: the root would get ${ROOT_MB} MiB, at least 8192 MiB are needed (the disk needs about 10 GiB)"
+
+progress 6 "labelling ${DISK}s1: /boot ${BOOT_MB} MiB, swap ${SWAP_MB} MiB, / ${ROOT_MB} MiB"
+disklabel64 -r -w "${DISK}s1" auto >> "$LOG" 2>&1 || : # the virgin label; read back below
+_lbl=$(mktemp "${TMPDIR:-/tmp}/$PROG.label.XXXXXX") || fail 'cannot create a temporary file'
+# The label gets a name of its own (the slug and 8 random hex digits):
+# devfs then names the partitions /dev/part-by-label/<name>.a, .b, .d,
+# whatever the disk is called on the next boot. fstab, the loader and
+# crypttab use those names, so the installed system survives disks being
+# added, removed or renumbered (vbd0 today may be vbd1 tomorrow).
+_rand=$(od -An -N4 -tx1 /dev/urandom 2> /dev/null | tr -d ' \n')
+matches '^[0-9a-f]{8}$' "${_rand:-x}" || fail 'cannot read random bytes for the name of the disk label'
+LABEL="@SLUG@-$_rand"
+PART="part-by-label/$LABEL"
+disklabel64 -r "${DISK}s1" 2>> "$LOG" |
+	awk '$2 == "partitions:" || cut { cut = 1 } !cut { print $0 }' |
+	sed -e '/^label:/d' > "$_lbl"
+[ -s "$_lbl" ] || {
+	rm -f "$_lbl"
+	fail "cannot read the label of ${DISK}s1"
+}
+printf 'label: %s\n' "$LABEL" >> "$_lbl"
+{
+	printf '16 partitions:\n'
+	printf '#          size     offset    fstype\n'
+	printf '  a:\t%dM\t0\t4.2BSD\n' "$BOOT_MB"
+	[ "$SWAP_MB" -eq 0 ] || printf '  b:\t%dM\t*\tswap\n' "$SWAP_MB"
+	if [ "$FS" = ufs ]; then
+		printf '  d:\t*\t*\t4.2BSD\n'
+	else
+		printf '  d:\t*\t*\tHAMMER2\n'
+	fi
+} >> "$_lbl"
+cat "$_lbl" >> "$LOG"
+disklabel64 -R -B -r "${DISK}s1" "$_lbl" >> "$LOG" 2>&1 || {
+	rm -f "$_lbl"
+	fail "cannot write the label of ${DISK}s1 (see $LOG)"
+}
+rm -f "$_lbl"
+# devfs makes the names of the label at once; give it a moment all the same
+_w=0
+while [ ! -e "$DEV/$PART.d" ] && [ "$_w" -lt 10 ]; do
+	sleep 1
+	_w=$((_w + 1))
+done
+[ -e "$DEV/$PART.d" ] || fail "the partitions of ${DISK}s1 did not appear as $DEV/$PART.d"
+
+ROOTDEV="$DEV/${DISK}s1d"
+SWAPDEV="/dev/$PART.b"
+MAPPED=''
+if [ "$ENC" -eq 1 ]; then
+	# the passphrase without its end of line: the passphrase typed at boot
+	# has none. The copy lives in a directory of root only and is removed
+	# with it.
+	progress 7 "encrypting ${DISK}s1d (dm_crypt, LUKS)"
+	KEYDIR=$(mktemp -d "${TMPDIR:-/tmp}/$PROG.key.XXXXXX") || fail 'cannot create a private directory'
+	chmod 700 "$KEYDIR"
+	( umask 077; tr -d '\n' < "$PASSFILE" > "$KEYDIR/key" ) || fail 'cannot copy the passphrase'
+	run cryptsetup -q luksFormat -d "$KEYDIR/key" "$DEV/${DISK}s1d"
+	run cryptsetup luksOpen -d "$KEYDIR/key" "$DEV/${DISK}s1d" root
+	MAPPED='root'
+	ROOTDEV="$DEV/mapper/root"
+	[ "$ENCSWAP" -eq 0 ] || SWAPDEV=/dev/mapper/swap
+fi
+
+progress 8 'creating the file systems'
+run newfs_msdos -F 32 -c 2 -L EFI -m 0xf8 "$DEV/${DISK}s0"
+run newfs -i 65536 "$DEV/${DISK}s1a"
+if [ "$FS" = ufs ]; then
+	run newfs -U "$ROOTDEV"
+else
+	run newfs_hammer2 "$ROOTDEV"
+fi
+
+# the data volumes of the plan: each one a whole disk, one partition of
+# its filesystem under a label of its own, mounted from fstab by that label
+for _dv in $DATAVOLS; do
+	_dn=${_dv%%|*}; _r=${_dv#*|}
+	_dd=${_r%%|*}; _r=${_r#*|}
+	_dfs=${_r%%|*}; _dm=${_r#*|}
+	progress 9 "preparing the data volume $_dn on $_dd ($_dfs, $_dm)"
+	case " $(sysctl -n kern.disks 2> /dev/null) " in
+	*" $_dd "*) ;;
+	*) fail "$_dd is not a disk of this machine" ;;
+	esac
+	[ -e "$DEV/$_dd" ] || fail "no such device: $DEV/$_dd"
+	_busy=$(disk_busy_reason "$_dd")
+	[ -z "$_busy" ] || fail "$_dd is in use ($_busy is mounted or is swap); choose another disk for the data volume $_dn"
+	case " $DATAWIPES " in
+	*" $_dd|secure "*)
+		printf '+ dd if=/dev/zero of=%s bs=1m\n' "$DEV/$_dd" >> "$LOG"
+		dd if=/dev/zero of="$DEV/$_dd" bs=1m >> "$LOG" 2>&1 || :
+		;;
+	esac
+	run dd if=/dev/zero of="$DEV/$_dd" bs=32k count=16
+	gpt destroy "$_dd" >> "$LOG" 2>&1 || :
+	run gpt create -f "$_dd"
+	run gpt add -i 0 -t dragonfly "$_dd"
+	disklabel64 -r -w "${_dd}s0" auto >> "$LOG" 2>&1 || :
+	_dl=$(od -An -N4 -tx1 /dev/urandom 2> /dev/null | tr -d ' \n')
+	_dlab="@SLUG@-$_dn-$_dl"
+	_dp=$(mktemp "${TMPDIR:-/tmp}/$PROG.label.XXXXXX") || fail 'cannot create a temporary file'
+	disklabel64 -r "${_dd}s0" 2>> "$LOG" |
+		awk '$2 == "partitions:" || cut { cut = 1 } !cut { print $0 }' | sed -e '/^label:/d' > "$_dp"
+	[ -s "$_dp" ] || { rm -f "$_dp"; fail "cannot read the label of ${_dd}s0"; }
+	{
+		printf 'label: %s\n16 partitions:\n#          size     offset    fstype\n' "$_dlab"
+		if [ "$_dfs" = ufs ]; then printf '  a:\t*\t0\t4.2BSD\n'; else printf '  a:\t*\t0\tHAMMER2\n'; fi
+	} >> "$_dp"
+	cat "$_dp" >> "$LOG"
+	disklabel64 -R -r "${_dd}s0" "$_dp" >> "$LOG" 2>&1 || { rm -f "$_dp"; fail "cannot write the label of ${_dd}s0"; }
+	rm -f "$_dp"
+	_w=0
+	while [ ! -e "$DEV/part-by-label/$_dlab.a" ] && [ "$_w" -lt 10 ]; do sleep 1; _w=$((_w + 1)); done
+	[ -e "$DEV/part-by-label/$_dlab.a" ] || fail "the partition of ${_dd}s0 did not appear as $DEV/part-by-label/$_dlab.a"
+	if [ "$_dfs" = ufs ]; then
+		run newfs -U "$DEV/${_dd}s0a"
+	else
+		run newfs_hammer2 "$DEV/${_dd}s0a"
+	fi
+	DATAFSTAB="$DATAFSTAB
+/dev/part-by-label/$_dlab.a	$_dm	$_dfs	rw	2	2"
+done
+
+# --------------------------------------------------------------------------
+# the mounts
+# --------------------------------------------------------------------------
+
+if [ -n "${INSTALL_MNT:-}" ]; then
+	MNT=${INSTALL_MNT%/}
+	mkdir -p "$MNT" || fail "cannot create $MNT"
+else
+	MNT=$(mktemp -d "${TMPDIR:-/tmp}/$PROG.mnt.XXXXXX") || fail 'cannot create a mount point'
+	MNT_MADE=1
+fi
+
+progress 10 'writing the EFI loader'
+run mount_msdos "$DEV/${DISK}s0" "$MNT"
+mounted "$MNT"
+run mkdir -p "$MNT/EFI/BOOT"
+run cp "$SRC/boot/boot1.efi" "$MNT/EFI/BOOT/BOOTX64.EFI"
+[ -s "$MNT/EFI/BOOT/BOOTX64.EFI" ] || fail 'the EFI loader was not written'
+run umount "$MNT"
+MOUNTED=''
+
+progress 12 'mounting the new system'
+if [ "$FS" = ufs ]; then
+	run mount -t ufs "$ROOTDEV" "$MNT"
+else
+	run mount_hammer2 "$ROOTDEV" "$MNT"
+fi
+mounted "$MNT"
+run mkdir -p "$MNT/boot"
+run mount -t ufs "$DEV/${DISK}s1a" "$MNT/boot"
+mounted "$MNT/boot"
+NULLS='/build/usr.obj:/usr/obj /build/var.crash:/var/crash /build/var.cache:/var/cache /build/var.spool:/var/spool /build/var.log:/var/log /build/var.tmp:/var/tmp'
+for _nm in $NULLS; do
+	run mkdir -p "$MNT${_nm%%:*}" "$MNT${_nm#*:}"
+	run mount_null "$MNT${_nm%%:*}" "$MNT${_nm#*:}"
+	mounted "$MNT${_nm#*:}"
+done
+run mkdir -p "$MNT/tmp"
+run chmod 1777 "$MNT/tmp"
+
+# --------------------------------------------------------------------------
+# the copy of the live root
+# --------------------------------------------------------------------------
+
+_sources="$SRC/usr/share/installer/sources.conf"
+if [ -f "$_sources" ]; then
+	_list=$(grep '^/' "$_sources")
+else
+	_list='/COPYRIGHT /bin /boot /compat /etc /lib /libexec /root /sbin /usr/Makefile /usr/bin /usr/games /usr/include /usr/lib /usr/libdata /usr/libexec /usr/local /usr/local/etc /usr/obj /usr/sbin /usr/share /usr/src /var'
+fi
+_total=$(printf '%s\n' $_list | grep -c .)
+_i=0
+for _p in $_list; do
+	_i=$((_i + 1))
+	case $_p in
+	/tmp | /tmp/* | *..*) continue ;;
+	esac
+	_s="$SRC$_p"
+	[ -d "$SRC$_p.hdd" ] && _s="$SRC$_p.hdd"
+	[ -e "$_s" ] || continue
+	progress $((15 + 70 * _i / _total)) "copying $_p"
+	run mkdir -p "$MNT$(dirname -- "$_p")"
+	run cpdup -o "$_s" "$MNT$_p"
+done
+
+# --------------------------------------------------------------------------
+# the configuration of the installed system
+# --------------------------------------------------------------------------
+
+progress 86 'configuring the installed system'
+if [ -f "$SRC/etc/mtree/BSD.var.dist" ]; then
+	run mtree -deiU -f "$SRC/etc/mtree/BSD.var.dist" -p "$MNT/var"
+fi
+[ -e "$MNT/sys" ] || [ -L "$MNT/sys" ] || run ln -s usr/src/sys "$MNT/sys"
+run mkdir -p "$MNT/home" "$MNT/proc" "$MNT/dev" "$MNT/mnt"
+for _dv in $DATAVOLS; do
+	run mkdir -p "$MNT${_dv##*|}"
+done
+
+# the loader: the root of the installed system (the live loader.conf
+# points at the live media and is not kept, as with the stock installer)
+rm -f "$MNT/boot/loader.conf"
+if [ "$ENC" -eq 1 ]; then
+	# the root of an encrypted disk: the initrd asks for the passphrase
+	# and mounts the real root (the stock installer writes the same)
+	{
+		printf 'vfs.root.mountfrom="ufs:md0s0"\n'
+		printf 'vfs.root.realroot="crypt:%s:%s.d:root"\n' "$FS" "$PART"
+		printf 'dm_load="yes"\n'
+		printf 'dm_target_crypt_load="yes"\n'
+		printf 'initrd.img_load="YES"\n'
+		printf 'initrd.img_type="md_image"\n'
+	} > "$MNT/boot/loader.conf" || fail 'cannot write /boot/loader.conf'
+	if [ "$ENCSWAP" -eq 1 ]; then
+		printf 'swap\t/dev/%s.b\tnone\tnone\n' "$PART" >> "$MNT/etc/crypttab" || fail 'cannot write /etc/crypttab'
+	fi
+else
+	printf 'vfs.root.mountfrom="%s:%s.d"\n' "$FS" "$PART" > "$MNT/boot/loader.conf" ||
+		fail 'cannot write /boot/loader.conf'
+fi
+# the branding of the loader (its ASCII art off, the menu of the product in
+# /boot/dloader.menu, which the copy of /boot brought along) is kept
+if grep -q '^fred_disable="YES"' "$SRC/boot/loader.conf" 2> /dev/null; then
+	printf 'fred_disable="YES"\n' >> "$MNT/boot/loader.conf" || fail 'cannot write /boot/loader.conf'
+fi
+if [ "$ENC" -eq 1 ]; then
+	_rootline=/dev/mapper/root
+	_rootpass='2 2'
+else
+	_rootline=/dev/$PART.d
+	_rootpass='1 1'
+fi
+
+{
+	printf '# Device\t\tMountpoint\tFStype\tOptions\t\tDump\tPass#\n'
+	printf '/dev/%s.a\t/boot\t\tufs\trw\t\t2\t2\n' "$PART"
+	[ "$SWAP_MB" -eq 0 ] || printf '%s\t\tnone\t\tswap\tsw\t\t0\t0\n' "$SWAPDEV"
+	printf '%s\t\t/\t\t%s\trw\t\t%s\n' "$_rootline" "$FS" "$_rootpass"
+	for _nm in $NULLS; do
+		printf '%s\t%s\t\tnull\trw\t\t0\t0\n' "${_nm%%:*}" "${_nm#*:}"
+	done
+	[ -z "$DATAFSTAB" ] || printf '%s\n' "${DATAFSTAB#?}"
+	printf 'tmpfs\t/tmp\t\ttmpfs\trw\t\t0\t0\n'
+	printf 'proc\t\t\t/proc\t\tprocfs\trw\t\t0\t0\n'
+} > "$MNT/etc/fstab" || fail 'cannot write /etc/fstab'
+
+# the dump device: the swap of this disk by its label. A dumpdev the copy
+# brought along names a device of another disk, and is replaced.
+if [ -f "$MNT/etc/rc.conf" ] && grep -q '^dumpdev=' "$MNT/etc/rc.conf"; then
+	grep -v '^dumpdev=' "$MNT/etc/rc.conf" > "$MNT/etc/rc.conf.new" &&
+		cat "$MNT/etc/rc.conf.new" > "$MNT/etc/rc.conf" && rm -f "$MNT/etc/rc.conf.new" ||
+		fail 'cannot write /etc/rc.conf'
+fi
+if [ "$SWAP_MB" -gt 0 ] && [ "$ENCSWAP" -eq 0 ]; then
+	printf 'dumpdev="/dev/%s.b"\n' "$PART" >> "$MNT/etc/rc.conf" || fail 'cannot write /etc/rc.conf'
+fi
+disklabel64 "${DISK}s1" > "$MNT/etc/disklabel.${DISK}s1" 2>> "$LOG" || :
+
+# the network of the installed system
+if [ -n "$NETCONF" ]; then
+	printf '%s\n' "${NETCONF#?}" >> "$MNT/etc/rc.conf" || fail 'cannot write the network into /etc/rc.conf'
+fi
+
+if [ -n "$NETCONF6" ]; then
+	printf '%s\n' "${NETCONF6#?}" >> "$MNT/etc/rc.conf" || fail 'cannot write IPv6 into /etc/rc.conf'
+fi
+if [ -n "$DNS_A" ]; then
+	: > "$MNT/etc/resolv.conf"
+	for _dns in $DNS_A; do
+		printf 'nameserver %s\n' "$_dns" >> "$MNT/etc/resolv.conf"
+	done
+	# the DHCP client keeps them in front of what it learns
+	cp "$MNT/etc/resolv.conf" "$MNT/etc/resolv.conf.head" || fail 'cannot write /etc/resolv.conf.head'
+fi
+if [ -n "$WIFI_IF" ]; then
+	(
+		umask 077
+		{
+			printf 'ctrl_interface=/var/run/wpa_supplicant\n'
+			printf 'network={%s\n}\n' "$WIFI_NET"
+		} > "$MNT/etc/wpa_supplicant.conf"
+	) || fail 'cannot write /etc/wpa_supplicant.conf'
+	chmod 600 "$MNT/etc/wpa_supplicant.conf"
+	printf 'wlans_%s="wlan0"\nifconfig_wlan0="WPA DHCP"\n' "$WIFI_IF" >> "$MNT/etc/rc.conf" ||
+		fail 'cannot write the Wi-Fi into /etc/rc.conf'
+fi
+
+# the hardware clock
+case $CLOCK_A in
+local) : > "$MNT/etc/wall_cmos_clock" || fail 'cannot write /etc/wall_cmos_clock' ;;
+utc) rm -f "$MNT/etc/wall_cmos_clock" ;;
+esac
+
+# the locale: the default class of login.conf
+if [ -n "$LOCALE_A" ] && [ -f "$MNT/etc/login.conf" ]; then
+	awk -v l="$LOCALE_A" '
+		/^default:/ && !done { print; print "\t:charset=UTF-8:\\"; print "\t:lang=" l ":\\"; done = 1; next }
+		/^\t:(lang|charset)=/ && in_default { next }
+		{ print }' "$MNT/etc/login.conf" > "$MNT/etc/login.conf.new" &&
+		mv "$MNT/etc/login.conf.new" "$MNT/etc/login.conf" || fail 'cannot write /etc/login.conf'
+	run cap_mkdb "$MNT/etc/login.conf"
+fi
+
+# the automatic login of the user (asked for with -A)
+if [ "$AUTOLOGIN" -eq 1 ]; then
+	run mkdir -p "$MNT/usr/local/etc/lightdm/lightdm.conf.d"
+	printf '[Seat:*]\nautologin-user=%s\nautologin-user-timeout=0\nautologin-session=xfce\n' "$USERNAME" \
+		> "$MNT/usr/local/etc/lightdm/lightdm.conf.d/80-autologin.conf" || fail 'cannot write the automatic login'
+fi
+
+# the keyboard of X: the layout of the console keymap
+if [ -n "$KEYMAP_A" ]; then
+	set -- $(xkb_layout "$KEYMAP_A")
+	run mkdir -p "$MNT/usr/local/etc/X11/xorg.conf.d"
+	{
+		printf '# the keyboard of the installer (%s), written by %s\n' "$KEYMAP_A" "$PROG"
+		printf 'Section "InputClass"\n'
+		printf '\tIdentifier "keyboard"\n'
+		printf '\tMatchIsKeyboard "on"\n'
+		printf '\tOption "XkbLayout" "%s"\n' "$1"
+		[ -z "${2:-}" ] || printf '\tOption "XkbVariant" "%s"\n' "$2"
+		printf 'EndSection\n'
+	} > "$MNT/usr/local/etc/X11/xorg.conf.d/00-keyboard.conf" || fail 'cannot write the keyboard of X'
+fi
+
+progress 90 'removing the live session from the installed system'
+run "$SRC/usr/local/sbin/@SLUG@-live-clean" "$MNT"
+run pwd_mkdb -p -d "$MNT/etc" "$MNT/etc/master.passwd"
+
+progress 93 'writing the configuration of the first boot'
+_conf="$MNT/boot/firstboot-user.conf"
+rm -f "$_conf" "$_conf.done"
+(
+	umask 077
+	{
+		printf 'USERNAME=%s\n' "$USERNAME"
+		[ -z "$FULLNAME_A" ] || printf 'FULLNAME=%s\n' "$FULLNAME_A"
+		[ "$NOPASS" -eq 0 ] || printf 'DOAS_NOPASS=yes\n'
+		printf 'PASSWORD_HASH=%s\n' "$HASH"
+		[ -z "$KEYS" ] || printf '%s\n' "${KEYS#?}"
+		[ -z "$HOSTNAME_A" ] || printf 'HOSTNAME=%s\n' "$HOSTNAME_A"
+		[ -z "$TZ_A" ] || printf 'TIMEZONE=%s\n' "$TZ_A"
+		[ -z "$KEYMAP_A" ] || printf 'KEYMAP=%s\n' "$KEYMAP_A"
+		[ -z "$ROOTHASH" ] || printf 'ROOT_PASSWORD_HASH=%s\n' "$ROOTHASH"
+	} > "$_conf"
+) || fail "cannot write $_conf"
+chmod 600 "$_conf" || fail "cannot set the mode of $_conf"
+chown 0:0 "$_conf" 2>> "$LOG" || :
+
+# the packages, updated in the new system (asked for with -U), and the
+# licensed software the user accepted (-l)
+if [ "$UPDATE" -eq 1 ] || [ -n "$LICPKGS" ]; then
+	progress 94 'updating the packages of the installed system'
+	run mkdir -p "$MNT/dev"
+	run mount -t devfs devfs "$MNT/dev"
+	mounted "$MNT/dev"
+	_rc_made=0
+	if [ ! -s "$MNT/etc/resolv.conf" ] && [ -f /etc/resolv.conf ]; then
+		cp /etc/resolv.conf "$MNT/etc/resolv.conf" && _rc_made=1
+	fi
+	if [ "$UPDATE" -eq 1 ]; then
+		if pkg -c "$MNT" update -f >> "$LOG" 2>&1 && pkg -c "$MNT" upgrade -y >> "$LOG" 2>&1; then
+			progress 95 'the packages are up to date'
+		else
+			progress 95 'the packages could not be updated (the system is installed; run pkg upgrade later)'
+		fi
+	fi
+	if [ -n "$LICPKGS" ]; then
+		# shellcheck disable=SC2086
+		if pkg -c "$MNT" install -y $LICPKGS >> "$LOG" 2>&1; then
+			progress 95 "the accepted licensed software is installed:$LICPKGS"
+		else
+			progress 95 "the accepted licensed software could not be installed:$LICPKGS (the system is installed; pkg install it later)"
+		fi
+	fi
+	[ "$_rc_made" -eq 0 ] || rm -f "$MNT/etc/resolv.conf"
+fi
+
+if [ -n "$ACCEPTFILE" ]; then
+	run mkdir -p "$MNT/var/db/@SLUG@"
+	run cp "$ACCEPTFILE" "$MNT/var/db/@SLUG@/licenses-accepted.json"
+	run chmod 644 "$MNT/var/db/@SLUG@/licenses-accepted.json"
+fi
+
+progress 96 'checking the installed system'
+[ -s "$MNT/boot/kernel/kernel" ] || fail 'the installed system has no kernel'
+[ -s "$MNT/boot/loader.efi" ] || [ -s "$MNT/boot/loader" ] || fail 'the installed system has no loader'
+if [ "$ENC" -eq 1 ]; then
+	grep -q "^vfs.root.realroot=\"crypt:$FS:" "$MNT/boot/loader.conf" || fail 'the loader does not name the encrypted root'
+	[ -f "$MNT/boot/kernel/initrd.img.gz" ] || [ -f "$MNT/boot/kernel/initrd.img" ] || fail 'the installed system has no initrd'
+else
+	grep -q "^vfs.root.mountfrom=\"$FS:$PART.d\"" "$MNT/boot/loader.conf" || fail 'the loader does not name the root by its label'
+fi
+[ -s "$MNT/etc/master.passwd" ] || fail 'the installed system has no password database'
+if grep -q '^installer:' "$MNT/etc/master.passwd"; then
+	fail 'the installed system carries the installer account of the live media'
+fi
+if grep -q '^live:' "$MNT/etc/master.passwd"; then
+	fail 'the installed system carries the live user'
+fi
+[ ! -e "$MNT/usr/local/etc/lightdm/lightdm.conf.d/90-live-autologin.conf" ] ||
+	fail 'the installed system logs the live user in by itself'
+grep -q "^USERNAME=$USERNAME\$" "$_conf" || fail 'the configuration of the first boot was not written'
+
+# the log of the run goes with the installed system (it holds no hash)
+cp "$LOG" "$MNT/var/log/$PROG.log" 2> /dev/null && chmod 600 "$MNT/var/log/$PROG.log"
+
+progress 98 'unmounting the new system'
+for _m in $MOUNTED; do
+	run umount "$_m"
+	MOUNTED=${MOUNTED#"$_m "}
+done
+MOUNTED=''
+for _mp in $MAPPED; do
+	run cryptsetup luksClose "$_mp"
+done
+MAPPED=''
+[ -z "$KEYDIR" ] || rm -rf "$KEYDIR"
+KEYDIR=''
+run disklabel64 -B "${DISK}s1"
+[ "$MNT_MADE" -eq 1 ] && rmdir "$MNT" 2> /dev/null
+
+progress 100 "@DISTRO_NAME@ is installed on $DISK"
+rm -f "$LOG"
+exit 0

@@ -1,0 +1,14 @@
+# overlay/profiles/desktop/rc.conf.d/lightdm — the display manager of the
+# desktop, on the live media and on the installed system.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# One rc.conf(5) variable per file. LightDM runs on the live media too:
+# there /etc/rc.d/live_session (which runs before it) creates the live
+# user and tells LightDM to log it in by itself, into a session that
+# opens the graphical installer first. The installed system has no live
+# user and no automatic login: LightDM shows the greeter. The stock
+# DragonFly installer stays on ttyv1 and on the serial line of the live
+# media (log in as installer) as the fallback.
+#
+lightdm_enable="YES"

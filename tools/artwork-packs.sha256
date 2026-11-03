@@ -1,0 +1,5 @@
+# tools/artwork-packs.sha256 — the pinned checksums of the pre-rendered artwork packs
+# of artwork-template (release pack-<commit 12>), checked before a downloaded
+# pack is used. Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause.
+9e53a16fa3676daa9da8fa888fdfde9a7ac80b44bcf57ddac391e9f438bdcbd6  examplebsd-353ef29aa000-cyberpunk.tar.xz
+10f2507cd0bb325534157f073d79bc08da6a5e1ded34686ebe683a75a0a1d3e4  examplebsd-353ef29aa000-default.tar.xz
