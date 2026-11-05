@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "comment": "The software of @DISTRO_NAME@ whose licence needs the acceptance of the user (the Additional software page of the installer). Every item: id, name, description, size_mb, licence {id, text (an absolute path on the media)}, flags {non_commercial, vendor_key, vendor_download, needs_network}, install {method: pkg, packages: [DPorts package names]}. The default set of this template needs no acceptance (X11, Mesa, the GPU and video drivers, Xfce and LightDM are redistributable with their notices), so the catalogue starts empty; a product adds its items here.",
+  "items": []
+}

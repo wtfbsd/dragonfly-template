@@ -1,0 +1,147 @@
+#!/bin/sh
+#
+# live_medium — the live media name the device they were started from in
+# /var/run/wtfbsd-live-medium, for the installer of installer-template.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The contract of installer-template (README, "The live medium"): a live
+# system writes, early at its start, a regular file of root that nobody
+# else can write, one line, the name of the device it was started from;
+# the installer follows that device to its disk and never offers it.
+#
+# The device is the disk the root is mounted from (mount -p): on the .img
+# of the desktop the loader mounts the root by its label,
+# /dev/part-by-label/<label>.a, a devfs link that is followed to its
+# partition (vbd1s1a), or, where devfs makes it a device of its own (DragonFly
+# 6.4: the same device number as the partition), matched by its device
+# number to the partition of a disk of kern.disks; the slice and the
+# partition are dropped, so the file
+# names the disk (/dev/vbd1). On the ISO it is the cd9660 device (/dev/cd0).
+# A link that cannot be followed, or a name that is not a disk, writes
+# nothing. Only the live media write it (the installer account of the
+# release tooling, as in live_session); /var/run is emptied at every start,
+# so the installed system has none. The file is written next to its place
+# and renamed over it (a rename never follows a symbolic link, and a link
+# planted there is replaced).
+#
+# It runs after /var/run is cleaned and before the live session and the
+# login (LightDM and the installer start after LOGIN).
+
+# PROVIDE: live_medium
+# REQUIRE: mountcritlocal cleanvar
+# BEFORE: live_session LOGIN
+# KEYWORD: nojail
+
+. /etc/rc.subr
+
+name=live_medium
+rcvar=live_medium_enable
+
+: ${live_medium_enable:="YES"}
+# the root the files are found under; empty on a real system (the test
+# suite points it at a staged tree)
+: ${live_medium_root:=""}
+load_rc_config "$name"
+
+R=$live_medium_root
+MARKER=/var/run/wtfbsd-live-medium
+
+note() { # note <msg> — to the console and to syslog
+	echo "live_medium: $*"
+	logger -t live_medium "$*" 2> /dev/null || :
+}
+
+# devnum_disk <device> — the partition of a disk of kern.disks that has the
+# device number of <device>: DragonFly's part-by-label and part-by-uuid nodes
+# are devices of their own, not links, with the number of the partition
+devnum_disk() {
+	local _num _d _p _found
+	[ -e "$R$1" ] || return 1
+	_num=$(stat -L -f '%Hr %Lr' "$R$1" 2> /dev/null) || return 1
+	[ -n "$_num" ] || return 1
+	_found=''
+	for _d in $(sysctl -n kern.disks 2> /dev/null); do
+		case $_d in *[!a-z0-9]* | '') continue ;; esac
+		for _p in "$R/dev/$_d" "$R/dev/$_d"s*; do
+			[ -e "$_p" ] && [ ! -L "$_p" ] || continue
+			[ "$(stat -L -f '%Hr %Lr' "$_p" 2> /dev/null)" = "$_num" ] || continue
+			# two partitions with the number: it cannot be told
+			[ -z "$_found" ] || [ "$_found" = "${_p##*/}" ] || return 1
+			_found=${_p##*/}
+		done
+	done
+	[ -n "$_found" ] || return 1
+	printf '%s\n' "$_found"
+}
+
+live_medium_start() {
+	local _dev _tmp _link _disk
+
+	# the live media carry the installer account of the release tooling
+	grep -q '^installer:' "$R/etc/master.passwd" 2> /dev/null || return 0
+
+	_dev=$(mount -p 2> /dev/null | awk '$2 == "/" { d = $1 } END { print d }')
+	# a single user start names the root without /dev/
+	case $_dev in
+	part-by-label/* | part-by-uuid/* | by-label/* | by-uuid/* | serno/*) _dev=/dev/$_dev ;;
+	esac
+	case $_dev in
+	/dev/*) ;;
+	*)
+		note "the device of the root is not a device ($_dev): $MARKER not written"
+		return 1
+		;;
+	esac
+	case $_dev in
+	*[!A-Za-z0-9/._@:-]*)
+		note "the name of the device of the root is not plain: $MARKER not written"
+		return 1
+		;;
+	esac
+	# a label, uuid or serial number link of devfs: followed to its device
+	case $_dev in
+	/dev/part-by-label/* | /dev/part-by-uuid/* | /dev/by-label/* | /dev/by-uuid/* | /dev/serno/*)
+		# a serial number names the disk; <serno>.s1a its partition
+		case $_dev in /dev/serno/*) _dev=${_dev%.s[0-9]*} ;; esac
+		if [ -L "$R$_dev" ] && _link=$(readlink "$R$_dev") && [ -n "$_link" ]; then
+			_dev=/dev/${_link##*/}
+		elif _link=$(devnum_disk "$_dev") && [ -n "$_link" ]; then
+			_dev=/dev/$_link
+		else
+			note "cannot follow $_dev to its device: $MARKER not written"
+			return 1
+		fi
+		;;
+	esac
+	# the disk of the partition: vbd1s1a, da0s0, vbd1s1 -> vbd1, da0
+	_disk=$(printf '%s\n' "${_dev#/dev/}" | sed -E 's/s[0-9]+[a-p]?$//')
+	case $_disk in
+	'' | *[!a-z0-9]* | [0-9]* | *[!0-9])
+		note "the root is on ${_dev}, not on the partition of a disk: $MARKER not written"
+		return 1
+		;;
+	esac
+	_dev=/dev/$_disk
+
+	mkdir -p "$R/var/run" || return 1
+	if ! _tmp=$(mktemp "$R$MARKER.XXXXXXXX"); then
+		note "cannot create a file in /var/run: $MARKER not written"
+		return 1
+	fi
+	# whatever is in its place (a link, maybe to a directory) is removed
+	# first: mv would follow a link to a directory and move into it
+	if ! printf '%s\n' "$_dev" > "$_tmp" || ! chmod 644 "$_tmp" ||
+		! rm -f "$R$MARKER" || ! mv -f "$_tmp" "$R$MARKER"; then
+		rm -f "$_tmp"
+		note "could not write $MARKER"
+		return 1
+	fi
+	note "the live medium is $_dev ($MARKER)"
+	return 0
+}
+
+start_cmd=live_medium_start
+stop_cmd=:
+
+run_rc_command "$1"
