@@ -1,0 +1,161 @@
+#!/bin/sh
+#
+# live_session — the live desktop of the live media: the live user, its
+# automatic login and the installer that opens first.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The live media are told apart from the installed system by the
+# installer account that the release tooling adds to them (customizeiso:
+# pw useradd installer -o -u 0), the same signal /etc/rc.d/firstboot_user
+# uses. The installed system has no such account: the installer copies
+# etc.hdd, where it does not exist.
+#
+# On the live media the script
+#   - creates the live user "live": the first free uid from 1100 up, a
+#     home in /home/live, no password that can be typed ("*": LightDM
+#     logs it in by itself), and NOT in the wheel group,
+#   - copies the autostart entry of the installer (installed by
+#     install-into-stage.sh of installer-template) into the autostart
+#     directory of the live user: the session opens the installer full
+#     screen first; the installer puts the "Install @DISTRO_NAME@" icon on
+#     the desktop, and its menu entry reopens it as well,
+#   - tells LightDM to log the live user in by itself
+#     (/usr/local/etc/lightdm/lightdm.conf.d/90-live-autologin.conf),
+#   - adds ONE doas(1) rule: the live user may run the root helper of the
+#     installer, and nothing else:
+#       permit nopass live as root cmd /usr/local/libexec/wtfbsd-installer/installer-apply
+#     (no keepenv, no setenv: the front ends of the installer run as the
+#     live user, never as root; the helper has no graphical toolkit).
+#
+# On every other system (the installed system) it runs
+# @SLUG@-live-clean, which removes whatever of the above is there: the
+# installed system has no live user, no automatic login and no installer
+# that opens by itself, whichever installer put it on the disk.
+#
+# The root of a cd9660 ISO is read-only: there the live session cannot be
+# set up (no home, no LightDM configuration); the script says so and does
+# nothing. The stock installer (log in as installer on ttyv1 or on the
+# serial line) is the install path there, as on every live media.
+#
+# The script runs before LightDM (BEFORE: LOGIN; LightDM requires LOGIN).
+
+# PROVIDE: live_session
+# REQUIRE: mountcritremote firstboot_user
+# BEFORE: LOGIN
+# KEYWORD: nojail
+
+. /etc/rc.subr
+
+name=live_session
+rcvar=live_session_enable
+
+: ${live_session_enable:="YES"}
+# the root the files are found under; empty on a real system (the test
+# suite points it at a staged tree)
+: ${live_session_root:=""}
+load_rc_config "$name"
+
+R=$live_session_root
+LIVE_USER=live
+LIVE_UID_MIN=1100
+HELPER=/usr/local/libexec/wtfbsd-installer/installer-apply
+AUTOSTART=/usr/local/share/wtfbsd-installer/autostart/wtfbsd-installer.desktop
+AUTOLOGIN_SRC=/usr/local/share/@SLUG@/live/90-live-autologin.conf
+AUTOLOGIN=/usr/local/etc/lightdm/lightdm.conf.d/90-live-autologin.conf
+DOAS_CONF=/usr/local/etc/doas.conf
+DOAS_MARK='# live-session: the rule below is removed on install'
+
+note() { # note <msg> — to the console and to syslog
+	echo "live_session: $*"
+	logger -t live_session "$*" 2> /dev/null || :
+}
+
+# is_live — the live media carry the installer account of the release
+# tooling; the installed system does not
+is_live() {
+	grep -q '^installer:' "$R/etc/master.passwd" 2> /dev/null
+}
+
+# free_uid — the first uid from LIVE_UID_MIN up that no account has
+free_uid() {
+	awk -F: -v min="$LIVE_UID_MIN" '
+		{ used[$3] = 1 }
+		END { u = min; while (u in used) u++; print u }' "$R/etc/passwd"
+}
+
+live_session_start() {
+	local _uid _home _d _rule
+
+	if ! is_live; then
+		# the installed system: no live user, no automatic login, no
+		# installer that opens by itself
+		if [ -x "$R/usr/local/sbin/@SLUG@-live-clean" ]; then
+			"$R/usr/local/sbin/@SLUG@-live-clean" "${R:-/}" > /dev/null 2>&1 ||
+				note "@SLUG@-live-clean failed"
+		fi
+		return 0
+	fi
+
+	if ! ( : > "$R/usr/local/etc/.live-write-test" ) 2> /dev/null ||
+		! ( : > "$R/home/.live-write-test" ) 2> /dev/null; then
+		rm -f "$R/usr/local/etc/.live-write-test" "$R/home/.live-write-test" 2> /dev/null
+		note "the root of the live media is read-only: no live desktop here; log in as installer on ttyv1 or on the serial line to install"
+		return 0
+	fi
+	rm -f "$R/usr/local/etc/.live-write-test" "$R/home/.live-write-test"
+
+	if [ ! -f "$R$AUTOSTART" ] || [ ! -x "$R$HELPER" ]; then
+		note "the installer of installer-template is missing ($AUTOSTART, $HELPER): no live desktop"
+		return 1
+	fi
+
+	# the live user: no password that can be typed ("*", the pw
+	# default), and no group but its own
+	if ! grep -q "^$LIVE_USER:" "$R/etc/passwd" 2> /dev/null; then
+		_uid=$(free_uid)
+		if ! pw useradd -n "$LIVE_USER" -u "$_uid" -c "Live user" -s /bin/sh -m; then
+			note "pw useradd $LIVE_USER failed: no live desktop"
+			return 1
+		fi
+		note "created the live user $LIVE_USER (uid $_uid)"
+	fi
+	_home=$(awk -F: -v u="$LIVE_USER" '$1 == u { print $6 }' "$R/etc/passwd")
+	case $_home in
+	/*) ;;
+	*) _home=/home/$LIVE_USER ;;
+	esac
+
+	# the installer opens first: the autostart entry of the installer
+	# root makes the directories and the file first and hands them to the
+	# live user last, so root never writes into a directory the user owns
+	_as=$R$_home/.config/autostart/wtfbsd-installer.desktop
+	if ! mkdir -p "$R$_home/.config/autostart" ||
+		! cp "$R$AUTOSTART" "$_as" || ! chmod 644 "$_as" ||
+		! chown "$LIVE_USER:$LIVE_USER" "$_as" "$R$_home/.config/autostart" "$R$_home/.config" "$R$_home"; then
+		note "could not set up the installer of the live session"
+		return 1
+	fi
+
+	# the automatic login of LightDM
+	mkdir -p "$R${AUTOLOGIN%/*}"
+	if ! cp "$R$AUTOLOGIN_SRC" "$R$AUTOLOGIN" || ! chmod 644 "$R$AUTOLOGIN"; then
+		note "could not write $AUTOLOGIN"
+		return 1
+	fi
+
+	# doas: the live user may run the root helper of the installer, and
+	# nothing else
+	_rule="permit nopass $LIVE_USER as root cmd $HELPER"
+	if ! grep -qxF "$_rule" "$R$DOAS_CONF" 2> /dev/null; then
+		printf '%s\n%s\n' "$DOAS_MARK" "$_rule" >> "$R$DOAS_CONF"
+		chmod 644 "$R$DOAS_CONF"
+	fi
+	note "the live desktop is ready: LightDM logs $LIVE_USER in, the installer opens first"
+	return 0
+}
+
+start_cmd=live_session_start
+stop_cmd=:
+
+run_rc_command "$1"

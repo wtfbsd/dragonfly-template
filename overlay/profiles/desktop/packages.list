@@ -68,3 +68,12 @@ x11/lightdm
 x11/lightdm-gtk-greeter
 x11-wm/xfce4
 x11-fm/thunar
+# The installer of the live desktop (installer-template): the GTK 3
+# wizard is Python with PyGObject (DPorts names the port py-pygobject;
+# python3 is the meta-port that provides the python3 command), its text
+# front end draws with bsddialog, and the stand-in launcher runs in xterm.
+lang/python3
+devel/py-pygobject
+x11-toolkits/gtk30
+x11/xterm
+devel/bsddialog

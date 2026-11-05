@@ -1,0 +1,7 @@
+# the stock menu of the fake release root
+menuitem 1 "Boot DragonFly [${default_kernel}]"
+menuadd boot
+menuitem s "Boot DragonFly in single user mode"
+menuadd boot -s
+menuitem R "Reboot"
+menuadd reboot

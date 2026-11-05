@@ -1,0 +1,150 @@
+#!/bin/sh
+#
+# @SLUG@-live-clean TARGET — remove what belongs to the live session from
+# the system whose root is TARGET.
+#
+# Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
+#
+# The live media set up a live session at boot (/etc/rc.d/live_session):
+# the live user, its automatic login and an installer that opens first.
+# None of it may reach an installed system. The installers copy the live
+# root, so this is run on the copy:
+#
+#   - by @SLUG@-install, on the disk it has just written,
+#   - by the stock DragonFly installer, through the hook it runs after the
+#     copy (/usr/local/bin/after_installation_routines.sh, TARGET /mnt),
+#   - by /etc/rc.d/live_session at every boot of a system that is not the
+#     live media (TARGET /), in case anything was left behind.
+#
+# What it removes:
+#   - the automatic login of LightDM (lightdm.conf.d/90-live-autologin.conf),
+#   - the doas(1) rule of the live user and the comment above it,
+#   - the live user: its lines in master.passwd, passwd and group, its
+#     home and its mail (the password database is rebuilt),
+#   - the installer itself: every path of the MANIFEST that
+#     install-into-stage.sh of installer-template installed
+#     (/usr/local/share/wtfbsd-installer/MANIFEST: the files, then the
+#     directories, which end in a slash, the deepest first, each with the
+#     __pycache__ of .pyc files Python run as root leaves in it), and the
+#     autostart and menu entries of the installer.
+#
+# It never touches the live media themselves: a TARGET that carries the
+# installer account of the release tooling in its etc/master.passwd is
+# the live media, and is refused.
+#
+# Exit status: 0 when the target holds nothing of the live session.
+
+set -u
+
+PROG=${0##*/}
+LIVE_USER=live
+
+die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
+
+[ $# -eq 1 ] || die "usage: $PROG TARGET"
+T=${1%/}
+[ -d "$T/" ] || die "no such target root: $1"
+[ -d "$T/etc" ] || die "the target holds no /etc: $1"
+
+if grep -q '^installer:' "$T/etc/master.passwd" 2> /dev/null; then
+	die "the target is the live media (it has the installer account): nothing removed"
+fi
+
+rc=0
+
+# the automatic login
+rm -f "$T/usr/local/etc/lightdm/lightdm.conf.d/90-live-autologin.conf" || rc=1
+
+# the doas rule of the live user, and its comment
+_doas="$T/usr/local/etc/doas.conf"
+if [ -f "$_doas" ] && grep -Eq "(live-session|^permit .* $LIVE_USER as root )" "$_doas"; then
+	grep -Ev "(live-session|^permit .* $LIVE_USER as root )" "$_doas" > "$_doas.new"
+	# grep exits 1 when no line is left: that is a valid (empty) file
+	[ $? -le 1 ] && cat "$_doas.new" > "$_doas" && rm -f "$_doas.new" || rc=1
+fi
+
+# the installer: the paths of its MANIFEST (absolute, no "..": anything
+# else in the file is refused and left alone), the files first, then the
+# directories (a trailing slash), which are removed only when empty
+# pycache_rm <dir> — the bytecode cache Python run as root on the live
+# media leaves in a directory of the installer (<dir>/__pycache__): removed
+# when it is a real directory that holds only regular .pyc files; anything
+# else in it is left, and the directory then stays and is reported
+pycache_rm() {
+	_pc="$1/__pycache__"
+	[ -d "$_pc" ] && [ ! -L "$_pc" ] || return 0
+	for _f in "$_pc"/* "$_pc"/.[!.]*; do
+		[ -e "$_f" ] || [ -L "$_f" ] || continue
+		case $_f in *.pyc) ;; *) return 0 ;; esac
+		[ -f "$_f" ] && [ ! -L "$_f" ] || return 0
+	done
+	for _f in "$_pc"/*.pyc; do
+		[ -f "$_f" ] || continue
+		rm -f "$_f" || return 0
+	done
+	rmdir "$_pc" 2> /dev/null || :
+}
+_man="$T/usr/local/share/wtfbsd-installer/MANIFEST"
+if [ -f "$_man" ]; then
+	_list=$(cat "$_man")
+	for _pass in files dirs; do
+		while IFS= read -r _p; do
+			case $_p in
+			'' | *..* | [!/]*) continue ;;
+			esac
+			case $_pass:$_p in
+			files:*/) continue ;;
+			dirs:*/)
+				pycache_rm "$T${_p%/}"
+				rmdir "$T${_p%/}" 2> /dev/null || [ ! -d "$T${_p%/}" ] || rc=1
+				;;
+			files:*) rm -f "$T$_p" || rc=1 ;;
+			esac
+		done <<EOF_MAN
+$_list
+EOF_MAN
+	done
+fi
+for _f in "$T/usr/local/etc/xdg/autostart/wtfbsd-installer.desktop" \
+	"$T/usr/local/share/applications/wtfbsd-installer.desktop"; do
+	rm -f "$_f" || rc=1
+done
+
+# the live user
+_had=0
+for _f in "$T/etc/master.passwd" "$T/etc/passwd" "$T/etc/group"; do
+	[ -f "$_f" ] || continue
+	case $_f in
+	*/group)
+		# the group of the live user, and the live user as a member
+		# of any other group
+		grep -q "^$LIVE_USER:" "$_f" || grep -Eq "[:,]$LIVE_USER(,|\$)" "$_f" || continue
+		awk -F: -v u="$LIVE_USER" 'BEGIN { OFS = ":" }
+			$1 == u { next }
+			{ n = split($4, m, ","); s = ""
+			  for (i = 1; i <= n; i++) if (m[i] != u) s = s (s == "" ? "" : ",") m[i]
+			  $4 = s; print }' "$_f" > "$_f.new" || rc=1
+		;;
+	*)
+		grep -q "^$LIVE_USER:" "$_f" || continue
+		_had=1
+		awk -F: -v u="$LIVE_USER" '$1 != u' "$_f" > "$_f.new" || rc=1
+		;;
+	esac
+	if [ -f "$_f.new" ]; then
+		case $_f in
+		*/master.passwd) chmod 600 "$_f.new" ;;
+		*) chmod 644 "$_f.new" ;;
+		esac
+		mv "$_f.new" "$_f" || rc=1
+	fi
+done
+if [ "$_had" -eq 1 ] && [ -f "$T/etc/master.passwd" ] && command -v pwd_mkdb > /dev/null 2>&1; then
+	pwd_mkdb -p -d "$T/etc" "$T/etc/master.passwd" || rc=1
+fi
+if [ -d "$T/home/$LIVE_USER" ]; then
+	rm -rf -- "$T/home/$LIVE_USER" || rc=1
+fi
+rm -f "$T/var/mail/$LIVE_USER" || rc=1
+
+exit "$rc"

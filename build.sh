@@ -71,6 +71,16 @@
 # so the product is part of the media itself and not a tarball the
 # operator has to unpack.
 #
+# The live desktop opens the graphical installer of installer-template
+# first. The desktop profile takes it from a pinned commit
+# (INSTALLER_REF in product.conf, cloned from INSTALLER_REPO with git) or
+# from a local checkout (INSTALLER_DIR in the environment, which wins),
+# and runs its install-into-stage.sh on the staged overlay: the launcher
+# /usr/local/bin/wtfbsd-installer, the installer under
+# /usr/local/{libexec,share}/wtfbsd-installer and its menu entry. The
+# installer calls the install command of this template,
+# /usr/local/sbin/<slug>-install.
+#
 # DragonFly cannot be cross-built: the release tooling has to run on
 # DragonFly itself. build.sh refuses the real build on any other host;
 # the dry run (-n) works anywhere.
@@ -117,6 +127,34 @@
 # never set them:
 #   WTFBSD_TEST_ALLOW_ANY_OS    do not require uname -s to be DragonFly
 #   WTFBSD_TEST_ALLOW_NONROOT   do not require the build to run as root
+#
+# The installer of the live desktop (the desktop profile only):
+#   INSTALLER_DIR   a local checkout of installer-template (wins)
+#   INSTALLER_REF   a commit or tag of installer-template (also a
+#                   product.conf key; empty or unset: the pinned main of
+#                   installer-template)
+#   INSTALLER_REPO  where INSTALLER_REF is cloned from (wins over the
+#                   product.conf key INSTALLER_URL; default
+#                   https://github.com/wtfbsd/installer-template.git)
+#
+# The branding of the desktop (the artwork template, tools/brand-stage.sh):
+#   ARTWORK_PACK    a pre-rendered pack of the artwork template
+#                   (scripts/pack.sh: <slug>-<commit>-<variant>.tar.xz and its
+#                   .sha256), made from ARTWORK_REF (wins; the build host
+#                   needs ImageMagick only)
+#   ARTWORK_DIR     a local checkout of the artwork template, rendered here
+#   ARTWORK_REF     a commit of the artwork template (also a product.conf key;
+#                   default the pinned main of artwork-template); without a
+#                   pack or a checkout, the pack of ARTWORK_REF and the
+#                   variant is downloaded from ARTWORK_PACK_URL (the releases
+#                   of artwork-template) and checked against the checksum
+#                   pinned in tools/artwork-packs.sha256
+#   ARTWORK_PACK_URL where the packs are published (default the releases
+#                   of artwork-template)
+#   ARTWORK_VARIANT (product.conf) the variant: default, cyberpunk, ...
+#   PRODUCT_VERSION (product.conf) the version in the identity line
+#                   (default: the year and month of the build, 2026.11; a
+#                   version that is not numbers and dots adds the build date)
 #
 set -eu
 
@@ -201,7 +239,13 @@ ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 # metacharacters. One pair of outer quotes (single or double) is stripped.
 KNOWN_KEYS='DISTRO_OS DISTRO_NAME DISTRO_SLUG DISTRO_ARCH FILESYSTEM_ROOT
 ZFS_DATA_POOL ZFS_POOL_NAME PROFILE PACKAGE_SET INSTALLER MOTD BRAND_COLOR
-BRAND_URL CI_ENABLED PUBLISH_METHOD PUBLISH_TARGET PUBLISHER_ORG'
+BRAND_URL CI_ENABLED PUBLISH_METHOD PUBLISH_TARGET PUBLISHER_ORG INSTALLER_REF
+INSTALLER_URL ARTWORK_REF ARTWORK_VARIANT ARTWORK_SHA256 PRODUCT_VERSION'
+# the keys of the live media (wtfbsd/agents questions.yaml): an empty value
+# means "not set", and the template's own pin or default is used
+# INSTALLER_REF may also come from the environment, which wins
+_env_installer_ref=${INSTALLER_REF:-}
+_env_artwork_ref=${ARTWORK_REF:-}
 for _k in $KNOWN_KEYS; do unset "$_k"; done
 while IFS= read -r _line || [ -n "$_line" ]; do
 	case $_line in '' | '#'*) continue ;; esac
@@ -241,6 +285,12 @@ while IFS= read -r _line || [ -n "$_line" ]; do
 	PUBLISH_METHOD) PUBLISH_METHOD=$_v ;;
 	PUBLISH_TARGET) PUBLISH_TARGET=$_v ;;
 	PUBLISHER_ORG) PUBLISHER_ORG=$_v ;;
+	INSTALLER_REF) INSTALLER_REF=$_v ;;
+	INSTALLER_URL) INSTALLER_URL=$_v ;;
+	ARTWORK_REF) ARTWORK_REF=$_v ;;
+	ARTWORK_VARIANT) ARTWORK_VARIANT=$_v ;;
+	ARTWORK_SHA256) ARTWORK_SHA256=$_v ;;
+	PRODUCT_VERSION) PRODUCT_VERSION=$_v ;;
 	esac
 done < "$CONF"
 
@@ -569,6 +619,130 @@ no) BINPKGS_ARG='' ;;
 *) die "BINPKGS must be 'yes' or 'no' (got: $BINPKGS)" ;;
 esac
 
+# The installer of the live desktop (see the top of this file).
+INSTALLER_REPO=${INSTALLER_REPO:-${INSTALLER_URL:-https://github.com/wtfbsd/installer-template.git}}
+# the pinned default: main of installer-template (the merged release)
+INSTALLER_REF_DEFAULT=907e707a606edc2023d437fc41c46a674f8143f5
+INSTALLER_REF=${_env_installer_ref:-${INSTALLER_REF:-$INSTALLER_REF_DEFAULT}}
+INSTDIR=''
+INSTFETCH=0
+case $profiles in
+*desktop*)
+	if [ -n "${INSTALLER_DIR:-}" ]; then
+		case $INSTALLER_DIR in
+		/*) INSTDIR=$INSTALLER_DIR ;;
+		*) INSTDIR="$(pwd)/$INSTALLER_DIR" ;;
+		esac
+		case $INSTDIR in *[[:space:]]*) die "INSTALLER_DIR may not contain whitespace: $INSTDIR" ;; esac
+		[ -f "$INSTDIR/install-into-stage.sh" ] ||
+			die "INSTALLER_DIR is not a checkout of installer-template: no install-into-stage.sh in $INSTDIR"
+	elif [ -n "$INSTALLER_REF" ]; then
+		# a commit (7 to 40 hex digits) or a tag; the pattern of
+		# wtfbsd/agents questions.yaml (no leading dash, no ..)
+		chk '^[A-Za-z0-9_][A-Za-z0-9._/-]{0,63}$' "$INSTALLER_REF" \
+			'INSTALLER_REF must be a commit or tag of installer-template (^[A-Za-z0-9_][A-Za-z0-9._/-]*$, up to 64 characters)'
+		case $INSTALLER_REF in *..*) die "INSTALLER_REF may not contain ..: $INSTALLER_REF" ;; esac
+		chk '^https://[A-Za-z0-9._~/:@%+-]{1,192}$' "$INSTALLER_REPO" 'INSTALLER_URL (INSTALLER_REPO) must be an https URL'
+		INSTDIR="$OUT/installer-template"
+		INSTFETCH=1
+	else
+		die "the desktop needs the installer of the live session: set INSTALLER_REF in product.conf (a commit of installer-template) or INSTALLER_DIR (a local checkout of installer-template)"
+	fi
+	;;
+esac
+
+# The artwork of the desktop: the greeter, the wallpaper, the logos and the
+# identity line come from the artwork template (see the top of this file).
+ARTWORK_PACK_URL=${ARTWORK_PACK_URL:-https://github.com/wtfbsd/artwork-template/releases/download}
+ARTWORK_PACKS_SHA256=${ARTWORK_PACKS_SHA256:-$ROOT/tools/artwork-packs.sha256}
+ARTURL=''
+ARTPIN=''
+# the pinned default: main of artwork-template (the merged release)
+ARTWORK_REF_DEFAULT=5aaea01b082938f3c6816cd5b881699e62d3d9dd
+ARTWORK_REF=${_env_artwork_ref:-${ARTWORK_REF:-$ARTWORK_REF_DEFAULT}}
+ARTWORK_VARIANT=${ARTWORK_VARIANT:-default}
+# ARTWORK_SHA256 (optional): the sha256 of the pack, for a product's own
+# artwork or another commit than the pinned one; it replaces the sum pinned
+# in tools/artwork-packs.sha256
+ARTWORK_SHA256=${ARTWORK_SHA256:-}
+[ -z "$ARTWORK_SHA256" ] || chk '^[0-9a-f]{64}$' "$ARTWORK_SHA256" 'ARTWORK_SHA256 must be 64 lowercase hex digits (the sha256 of the artwork pack)'
+# the build date (WTFBSD_BUILD_DATE, YYYY-MM-DD, pins it for reproducible
+# builds and for the test suite); the default version is its year.month
+_build_date=${WTFBSD_BUILD_DATE:-$(date -u +%Y-%m-%d)}
+chk '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' "$_build_date" 'WTFBSD_BUILD_DATE must be YYYY-MM-DD'
+WTFBSD_BUILD_DATE=$_build_date
+export WTFBSD_BUILD_DATE
+_ym=${_build_date%-*}
+PRODUCT_VERSION=${PRODUCT_VERSION:-$(printf '%s' "$_ym" | tr - .)}
+chk '^[a-z][a-z0-9-]{0,31}$' "$ARTWORK_VARIANT" 'ARTWORK_VARIANT must match ^[a-z][a-z0-9-]{0,31}$'
+chk '^[0-9A-Za-z][0-9A-Za-z.+_-]{0,31}$' "$PRODUCT_VERSION" 'PRODUCT_VERSION must match ^[0-9A-Za-z][0-9A-Za-z.+_-]{0,31}$'
+ARTDIR=''
+ARTFETCH=0
+ARTPACK=''
+case $profiles in
+*desktop*)
+	chk '^[0-9a-f]{7,40}$' "$ARTWORK_REF" \
+		'ARTWORK_REF must be a commit of the artwork template (7 to 40 hex digits), so that the artwork is pinned'
+	if [ -n "${ARTWORK_PACK:-}" ]; then
+		# a pre-rendered pack of the artwork template (scripts/pack.sh):
+		# the build host needs no renderer, only ImageMagick to stamp the
+		# identity line. It is checked against its .sha256 and must have
+		# been made from ARTWORK_REF, for the variant and the product.
+		case $ARTWORK_PACK in
+		/*) ARTPACK=$ARTWORK_PACK ;;
+		*) ARTPACK="$(pwd)/$ARTWORK_PACK" ;;
+		esac
+		case $ARTPACK in *[[:space:]]*) die "ARTWORK_PACK may not contain whitespace: $ARTPACK" ;; esac
+		case $ARTPACK in *.tar.xz) ;; *) die "ARTWORK_PACK must be a .tar.xz made by scripts/pack.sh: $ARTPACK" ;; esac
+		[ -f "$ARTPACK" ] || die "no such artwork pack: $ARTPACK"
+		[ -f "$ARTPACK.sha256" ] || die "the artwork pack has no checksum file: $ARTPACK.sha256"
+		_want=$(awk 'NR == 1 { print $1 }' "$ARTPACK.sha256")
+		if command -v sha256 > /dev/null 2>&1; then
+			_have=$(sha256 -q "$ARTPACK")
+		else
+			_have=$(sha256sum "$ARTPACK" | awk '{ print $1 }')
+		fi
+		[ -n "$_want" ] && [ "$_want" = "$_have" ] || die "the artwork pack does not match its checksum: $ARTPACK"
+		_pname=${ARTPACK##*/}
+		_pname=${_pname%.tar.xz}
+		if [ -n "$ARTWORK_SHA256" ]; then
+			[ "$ARTWORK_SHA256" = "$_have" ] ||
+				die "the artwork pack $_pname.tar.xz does not match ARTWORK_SHA256 of product.conf (got $_have)"
+		else
+			_pin=$(awk -v n="$_pname.tar.xz" '$2 == n { print $1 }' "$ARTWORK_PACKS_SHA256" 2> /dev/null | head -n 1)
+			[ -z "$_pin" ] || [ "$_pin" = "$_have" ] ||
+				die "the artwork pack $_pname.tar.xz is not the one pinned in $ARTWORK_PACKS_SHA256"
+		fi
+		ARTDIR="$OUT/artwork-pack/$_pname"
+	elif [ -n "${ARTWORK_DIR:-}" ]; then
+		case $ARTWORK_DIR in
+		/*) ARTDIR=$ARTWORK_DIR ;;
+		*) ARTDIR="$(pwd)/$ARTWORK_DIR" ;;
+		esac
+		case $ARTDIR in *[[:space:]]*) die "ARTWORK_DIR may not contain whitespace: $ARTDIR" ;; esac
+		[ -f "$ARTDIR/scripts/render.sh" ] ||
+			die "ARTWORK_DIR is not a checkout of the artwork template: no scripts/render.sh in $ARTDIR"
+	else
+		# the pre-rendered pack published with the artwork template
+		# (release pack-<commit 12>), downloaded and checked against the
+		# checksum pinned in tools/artwork-packs.sha256
+		chk '^https://[A-Za-z0-9./_-]+$' "$ARTWORK_PACK_URL" 'ARTWORK_PACK_URL must be an https URL'
+		_ref12=$(printf '%.12s' "$ARTWORK_REF")
+		_pname="$DISTRO_SLUG-$_ref12-$ARTWORK_VARIANT"
+		ARTPACK="$OUT/artwork-download/$_pname.tar.xz"
+		ARTURL="$ARTWORK_PACK_URL/pack-$_ref12/$_pname.tar.xz"
+		if [ -n "$ARTWORK_SHA256" ]; then
+			ARTPIN=$ARTWORK_SHA256
+		else
+			ARTPIN=$(awk -v n="$_pname.tar.xz" '$2 == n { print $1 }' "$ARTWORK_PACKS_SHA256" 2> /dev/null | head -n 1)
+		fi
+		[ -n "$ARTPIN" ] || die "no pinned checksum for the artwork pack $_pname.tar.xz in $ARTWORK_PACKS_SHA256: pin it there (from the .sha256 of the release), set ARTWORK_SHA256 in product.conf, or give ARTWORK_PACK (a pack you made with scripts/pack.sh) or ARTWORK_DIR"
+		ARTDIR="$OUT/artwork-pack/$_pname"
+		ARTFETCH=1
+	fi
+	;;
+esac
+
 log ''
 log 'plan:'
 log "  distro   $DISTRO_NAME ($DISTRO_SLUG), dragonfly/$DISTRO_ARCH"
@@ -584,9 +758,91 @@ elif [ "$NOUSER" -eq 1 ]; then
 else
 	log '  login    WARNING: no first-boot user given (the real build needs -u or --no-user)'
 fi
+if [ -n "$INSTDIR" ]; then
+	if [ "$INSTFETCH" -eq 1 ]; then
+		log "  installer installer-template $INSTALLER_REF from $INSTALLER_REPO"
+	else
+		log "  installer installer-template from $INSTDIR"
+	fi
+fi
+if [ -n "$ARTDIR" ]; then
+	if [ "$ARTFETCH" -eq 1 ]; then
+		log "  artwork  the published pack $ARTURL (sha256 $ARTPIN), variant $ARTWORK_VARIANT, version $PRODUCT_VERSION"
+	elif [ -n "$ARTPACK" ]; then
+		log "  artwork  the pack $ARTPACK (artwork-template $ARTWORK_REF), variant $ARTWORK_VARIANT, version $PRODUCT_VERSION"
+	else
+		log "  artwork  artwork-template from $ARTDIR, variant $ARTWORK_VARIANT, version $PRODUCT_VERSION"
+	fi
+fi
+if [ "$ARTFETCH" -eq 1 ]; then
+	log ''
+	log '==> the artwork of the desktop (the published pack of artwork-template)'
+	rmrf "$OUT/artwork-download" "$OUT"
+	step mkdir -p "$OUT/artwork-download"
+	if [ "$DRY" -eq 1 ] || command -v fetch > /dev/null 2>&1; then
+		step fetch -q -o "$ARTPACK" "$ARTURL"
+	else
+		step curl -fsSL -o "$ARTPACK" "$ARTURL"
+	fi
+	if [ "$DRY" -ne 1 ]; then
+		if command -v sha256 > /dev/null 2>&1; then
+			_have=$(sha256 -q "$ARTPACK")
+		else
+			_have=$(sha256sum "$ARTPACK" | awk '{ print $1 }')
+		fi
+		[ "$_have" = "$ARTPIN" ] ||
+			die "the downloaded artwork pack does not match the checksum pinned in $ARTWORK_PACKS_SHA256: $ARTURL (got $_have)"
+	fi
+fi
+if [ -n "$ARTPACK" ]; then
+	log ''
+	log '==> the artwork of the desktop (a pre-rendered pack)'
+	rmrf "$OUT/artwork-pack" "$OUT"
+	step mkdir -p "$OUT/artwork-pack"
+	step tar -xJf "$ARTPACK" -C "$OUT/artwork-pack"
+	if [ "$DRY" -ne 1 ]; then
+		[ -f "$ARTDIR/PACK" ] || die "the artwork pack holds no $(basename -- "$ARTDIR")/PACK: $ARTPACK"
+	fi
+fi
+if [ "$INSTFETCH" -eq 1 ]; then
+	log ''
+	log '==> the installer of the live desktop (installer-template)'
+	[ "$DRY" -eq 1 ] || command -v git > /dev/null 2>&1 ||
+		die 'INSTALLER_REF needs git on the build host (pkg install git), or use INSTALLER_DIR'
+	rmrf "$INSTDIR" "$OUT"
+	step git clone --quiet --no-checkout "$INSTALLER_REPO" "$INSTDIR"
+	step git -C "$INSTDIR" -c advice.detachedHead=false checkout --quiet "$INSTALLER_REF"
+	if [ "$DRY" -ne 1 ]; then
+		[ -f "$INSTDIR/install-into-stage.sh" ] ||
+			die "installer-template $INSTALLER_REF has no install-into-stage.sh"
+	fi
+fi
 
 RELS='' # relative artifact paths; safe to word-split: the slug is [a-z0-9-]
 first=1
+
+# install_into_stage <conf> — install-into-stage.sh of installer-template
+# into the staged overlay $SK. The artwork of the product (the unpacked
+# pack, or a checkout with its palette.env) goes to the installer too
+# (--artwork: its palette, header and slides). Without root the script
+# refuses to run unless it gets a METALOG (--metalog), which records the
+# owner root for the files.
+install_into_stage() {
+	set -- "$SK" --conf "$1"
+	if [ -n "$ARTDIR" ] && { [ "$DRY" -eq 1 ] || [ -f "$ARTDIR/palette.env" ]; }; then
+		# install-into-stage.sh checks the artwork with python3 on the
+		# build host (DragonFly: DPorts lang/python3 gives the python3
+		# command; a bare python3.11 is not enough)
+		if [ "$DRY" -ne 1 ] && ! python3 -I -c 'import sys' > /dev/null 2>&1; then
+			die "the build host has no working python3: install-into-stage.sh of installer-template needs it to check the artwork (pkg install lang/python3)"
+		fi
+		set -- "$@" --artwork "$ARTDIR"
+	fi
+	if [ "$(id -u)" != 0 ] && [ "$DRY" -ne 1 ]; then
+		set -- "$@" --metalog "$PSUB/installer.metalog"
+	fi
+	step sh "$INSTDIR/install-into-stage.sh" "$@"
+}
 
 for p in $profiles; do
 	log ''
@@ -699,6 +955,35 @@ for p in $profiles; do
 		step cp -R "$ROOT/overlay/profiles/$p/sysctl.conf.d/." "$RCD/sysctl/2-profile/"
 		subst_staged "$ROOT/overlay/profiles/$p/sysctl.conf.d" "$RCD/sysctl/2-profile"
 	fi
+	# the installer of the live desktop: install-into-stage.sh of
+	# installer-template puts it into the staged overlay, with a
+	# configuration that names the product and DragonFly (--conf). Run
+	# as root it gives the installer to root:wheel; the test suite runs
+	# without root and hands it a METALOG instead.
+	if [ "$p" = desktop ]; then
+		_iconf="$PSUB/installer.conf"
+		step sh -c '
+			{
+				printf "PRODUCT_NAME=%s\n" "$2"
+				printf "PRODUCT_SLUG=%s\n" "$3"
+				printf "OS=dragonfly\n"
+				printf "DEFAULT_KEYMAP=us.iso\n"
+				printf "DEFAULT_TZ=UTC\n"
+				# the live media name their disk in
+				# /var/run/wtfbsd-live-medium (rc.d/live_medium)
+				printf "LIVE_MEDIUM_REQUIRED=yes\n"
+			} > "$1"
+		' sh "$_iconf" "$DISTRO_NAME" "$DISTRO_SLUG"
+		install_into_stage "$_iconf"
+		if [ "$DRY" -ne 1 ]; then
+			for _ip in usr/local/bin/wtfbsd-installer usr/local/libexec/wtfbsd-installer/installer-apply \
+				usr/local/share/wtfbsd-installer/autostart/wtfbsd-installer.desktop \
+				usr/local/share/wtfbsd-installer/MANIFEST; do
+				[ -f "$SK/$_ip" ] ||
+					die "install-into-stage.sh of $INSTDIR did not install /$_ip"
+			done
+		fi
+	fi
 	# DragonFly has no motd template mechanism: the live file is the motd
 	if [ -f "$ROOT/overlay/base/rootfs/etc/motd.template" ]; then
 		step cp "$SK/etc/motd.template" "$SK/etc/motd"
@@ -796,6 +1081,15 @@ for p in $profiles; do
 		"$SK" ttyd0 comconsole "$_rmacct" "$_keepacct" "$RCD/installed" "$RCD/sysctl"
 	step pwd_mkdb -p -d "$ISOROOT/etc" "$ISOROOT/etc/master.passwd"
 	step pwd_mkdb -p -d "$ISOROOT/etc.hdd" "$ISOROOT/etc.hdd/master.passwd"
+	# the branding of the desktop: the greeter, the wallpaper, the logos,
+	# the identity file and the identity line, from the artwork template,
+	# into the release root (the built system names its own release in the
+	# identity); every spot its list marks for DragonFly is installed or
+	# the build stops (tools/brand-stage.sh)
+	if [ "$p" = desktop ]; then
+		step sh "$ROOT/tools/brand-stage.sh" "$ARTDIR" "$ARTWORK_VARIANT" "$ISOROOT" "$PSUB/branding" \
+			"$DISTRO_SLUG" "$DISTRO_NAME" "$PRODUCT_VERSION" "$DISTRO_ARCH" "$ARTWORK_REF"
+	fi
 
 	# 4. the media, built from the release root that was fixed. The
 	#    size of the image is handed to nrelease as IMGSIZE_MB: the

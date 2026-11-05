@@ -5,12 +5,24 @@
 # Copyright (c) 2026 The wtfbsd contributors. BSD-2-Clause (see LICENSE).
 #
 # It appends its arguments to $STUB_LOG and creates the archive it was
-# asked to write, so a test can assert that an archive was produced.
+# asked to write, so a test can assert that an archive was produced. An
+# extraction (-x...) is handed to the tar(1) of the host.
 
 set -eu
 
 : "${STUB_LOG:=/dev/null}"
 printf 'CMD tar %s\n' "$*" >> "$STUB_LOG"
+# extracting (the artwork pack of the build) is done for real, by the
+# tar(1) of the host
+case ${1:-} in
+-x*)
+	for _t in /usr/bin/tar /bin/tar /usr/bin/bsdtar; do
+		[ -x "$_t" ] && exec "$_t" "$@"
+	done
+	printf 'tar: the stand-in found no tar(1) of the host to extract with\n' >&2
+	exit 1
+	;;
+esac
 
 out=''
 while [ $# -gt 0 ]; do

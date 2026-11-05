@@ -16,8 +16,12 @@
 #   CONSOLE          the console of the kernel (comconsole)
 #   REMOVE_ACCOUNT   an account that is removed from the image, or - for none
 #   KEEP_ACCOUNT     an account with uid 0 that is NOT locked on the live
-#                    media (the installer account of the desktop ISO, which
-#                    is the install path), or - for none
+#                    media (the installer account of the desktop media, the
+#                    fallback install path), or - for none. When it is
+#                    set, the live media also get a getty on ttyv1 (the
+#                    release tooling has none there): the stock installer
+#                    stays reachable on ttyv1 and on the serial line while
+#                    LightDM owns the display
 #   SYSCTL_DIR       a directory of sysctl.conf(5) fragments (name=value
 #                    lines), or - for none: appended, in a block marked
 #                    per fragment, to /etc/sysctl.conf of the live media
@@ -27,9 +31,7 @@
 #                    only (etc.hdd/rc.conf), or - for none. They reach the
 #                    rc.conf of the live tree too when the live tree is
 #                    itself the system (no installer account left in it,
-#                    the appliance image). The desktop puts LightDM here:
-#                    the live media has no greeter, so the stock installer
-#                    keeps ttyv0 and ttyd0.
+#                    the appliance image).
 #
 # The step runs in the release root between the release of the media and
 # the media that are built from the release root. It does what the release
@@ -161,6 +163,20 @@ enable_getty() {
 	else
 		# the stock getty of DragonFly lives in /usr/libexec
 		printf '%s\t"/usr/libexec/getty std.9600"\tdialup\ton\n' "$_eg_tty" >> "$_eg_ttys"
+	fi
+}
+
+# enable_vt_getty <ttys> <ttyvN> — a getty for the virtual console: the
+# line of the tty is switched on, or added with the getty of the stock
+# virtual consoles of DragonFly (Pc, cons25) when the file has none
+enable_vt_getty() {
+	_ev_ttys=$1
+	_ev_tty=$2
+	[ -f "$_ev_ttys" ] || return 0
+	if grep -q "^$_ev_tty[[:space:]]" "$_ev_ttys"; then
+		enable_getty "$_ev_ttys" "$_ev_tty" keep
+	else
+		printf '%s\t"/usr/libexec/getty Pc"\t\tcons25\ton  secure ifexists\n' "$_ev_tty" >> "$_ev_ttys"
 	fi
 }
 
@@ -354,6 +370,11 @@ if [ -f "$ROOT/etc.hdd/ttys" ]; then
 	enable_getty "$ROOT/etc.hdd/ttys" "$GETTY" drop
 fi
 set_console "$ROOT/boot/loader.conf" "$CONSOLE"
+# the live media with an install account: its getty on ttyv1 as well
+# (LightDM owns the display of the live desktop)
+if [ "$KEEP" != - ]; then
+	enable_vt_getty "$ROOT/etc/ttys" ttyv1
+fi
 
 # the accounts with uid 0: the installer account of the desktop ISO is
 # the install path and keeps its empty password there
