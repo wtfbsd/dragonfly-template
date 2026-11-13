@@ -513,9 +513,18 @@ The desktop is refused without either. The desktop packages add
   implicitly. The default set of this template needs no acceptance (X11,
   Mesa, the GPU and video drivers, Xfce and LightDM are redistributable
   with their notices), so the catalogue ships empty: a product adds its
-  items (id, name, description, size_mb, licence id and text path, the
-  flags non_commercial / vendor_key / vendor_download / needs_network,
-  install method `pkg` and the package names).
+  items (id, name, description, size_mb, licence id and text path (an
+  absolute path on the media), the flags non_commercial / vendor_key /
+  vendor_download / needs_network, install method `pkg` and the package
+  names). The catalogue is also the list of the Additional software page
+  of the installer, whose `lib/licensed.py` (installer-template) reads it
+  strictly: the top-level keys are `version` (1), `items` (a list) and
+  `notices` only, and any other key makes it refuse the whole catalogue,
+  so a remark about the catalogue goes here, never into the file.
+  `notices` is optional: when it is there, it is the relative path of a
+  text file under the directory of the catalogue (letters, digits, `.`,
+  `_`, `-` and `/`; `"notices": "notices.txt"`), whose
+  text the "Open-source licences" link of the page shows.
 
 It writes the layout of the stock installer for UEFI and HAMMER2: GPT
 with a 128 MiB EFI partition (the loader as `EFI/BOOT/BOOTX64.EFI`) and a

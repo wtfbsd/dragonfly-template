@@ -4304,6 +4304,68 @@ sys.exit(0 if set(c) == want and c["boot"] == ["uefi"] and c["modes"] == ["erase
 	fi
 fi
 
+# (LV12) the top level of every catalogue of licensed software the overlay
+#        ships is one the installer reads: lib/licensed.py load() of
+#        installer-template refuses a top-level key other than version, items and notices, a
+#        version other than 1, items that are not a list and notices that
+#        are not the path of a file next to the catalogue. The rule is
+#        mirrored for every catalogue (the items are not); the real load()
+#        of the checkout of LV15 reads them whole when there is one.
+lvcats=$(find "$repo/overlay" -name licensed-software.json | sort)
+lvcatbad=$(printf '%s\n' "$lvcats" | python3 -I -c 'import json, os, re, sys
+bad = []
+for p in sys.stdin.read().split("\n"):
+    if not p:
+        continue
+    try:
+        c = json.load(open(p, encoding="utf-8"))
+    except ValueError as e:
+        bad.append("%s: not JSON (%s)" % (p, e)); continue
+    if not isinstance(c, dict):
+        bad.append("%s: not an object" % p); continue
+    extra = sorted(set(c) - {"version", "items", "notices"})
+    if extra:
+        bad.append("%s: top-level keys %s" % (p, ", ".join(extra)))
+    if c.get("version") != 1 or isinstance(c.get("version"), bool):
+        bad.append("%s: version is not 1" % p)
+    if not isinstance(c.get("items"), list):
+        bad.append("%s: items is not a list" % p)
+    n = c.get("notices")
+    # an empty or false notices is no notices, as load() reads it
+    if n and not (isinstance(n, str) and re.fullmatch(r"[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*", n)
+                  and ".." not in n.split("/") and "." not in n.split("/")
+                  and os.path.isfile(os.path.join(os.path.dirname(p), n))):
+        bad.append("%s: notices is not the path of a file next to the catalogue" % p)
+print("; ".join(bad))
+sys.exit(1 if bad else 0)' 2>&1)
+lvcatrc=$?
+if [ -n "$lvcats" ] && [ "$lvcatrc" -eq 0 ]; then
+	ok "(LV12) every licensed-software.json of the overlay has only version 1, items (a list) and notices (a file next to it), as the installer reads it"
+else
+	no "(LV12) every licensed-software.json of the overlay has only version 1, items (a list) and notices (a file next to it), as the installer reads it ($lvcatbad)"
+fi
+if [ -z "$lv15it" ] || [ ! -f "$lv15it/lib/licensed.py" ]; then
+	skip "(LV12) lib/licensed.py load() of installer-template reads every catalogue of the overlay (no checkout: set WTFBSD_TEST_INSTALLER_TEMPLATE or allow the clone)"
+else
+	lvcatload=$(printf '%s\n' "$lvcats" | python3 -I -c 'import sys
+sys.path.insert(0, sys.argv[1])
+import licensed
+bad = []
+for p in sys.stdin.read().split("\n"):
+    if p:
+        try:
+            licensed.load(p)
+        except licensed.CatalogueError as e:
+            bad.append("%s: %s" % (p, e))
+print("; ".join(bad))
+sys.exit(1 if bad else 0)' "$lv15it/lib" 2>&1)
+	if [ $? -eq 0 ]; then
+		ok "(LV12) lib/licensed.py load() of installer-template ($(printf '%.7s' "$lv15ref")) reads every catalogue of the overlay"
+	else
+		no "(LV12) lib/licensed.py load() of installer-template ($(printf '%.7s' "$lv15ref")) reads every catalogue of the overlay ($lvcatload)"
+	fi
+fi
+
 # (LV8) the first boot applies the host name, the time zone and the keymap
 #       of the installer; a bad value stops it before the system changes
 F="$lv/fbt"
