@@ -38,7 +38,7 @@ unset INSTALLER_REF INSTALLER_REPO
 # the branding of the desktop: packs of the stand-in artwork template, in
 # the layout of scripts/pack.sh of the artwork template (PACK, out/, ...)
 WTFBSD_BUILD_DATE=2026-11-01
-ARTREF=ce8e9714a2b47e3f17ff36ea647dbcc02f4399ac
+ARTREF=2e86db4e6df87d4d5affdab620c3f8ccbb88e4a7
 mkpack() { # mkpack <variant> <dir> [slug] — a pack of the stand-in, and its .sha256; prints its path
 	_mp_n="${3:-examplebsd}-$(printf '%.12s' "$ARTREF")-$1"
 	rm -rf "$2/$_mp_n"
@@ -4600,8 +4600,8 @@ fi
 # artwork template, cloned when nothing local is given
 env -u INSTALLER_DIR -u ARTWORK_PACK -u ARTWORK_PACKS_SHA256 sh "$build" -n -c "$fixture" -p desktop --no-user -o "$lv/a4" > "$lv/a4.log" 2>&1
 if grep -q 'checkout --quiet 907e707a606edc2023d437fc41c46a674f8143f5$' "$lv/a4.log" &&
-	grep -q 'fetch -q -o .*/examplebsd-ce8e9714a2b4-default.tar.xz https://github.com/wtfbsd/artwork-template/releases/download/pack-ce8e9714a2b4/examplebsd-ce8e9714a2b4-default.tar.xz$' "$lv/a4.log" &&
-	grep -q 'sha256 cf0b37d9a793f8f16cc78f2a82122fac28087253cc27cac384357fd6a6d85ce7' "$lv/a4.log"; then
+	grep -q 'fetch -q -o .*/examplebsd-2e86db4e6df8-default.tar.xz https://github.com/wtfbsd/artwork-template/releases/download/pack-2e86db4e6df8/examplebsd-2e86db4e6df8-default.tar.xz$' "$lv/a4.log" &&
+	grep -q 'sha256 efba8dc2b825a7daf367ac2c2c11ff685bb1329555483b360722e2d34529209b' "$lv/a4.log"; then
 	ok "(LV14) INSTALLER_REF and ARTWORK_REF default to the pinned main commits; the published pack of the variant is fetched and its checksum is pinned"
 else
 	no "(LV14) INSTALLER_REF and ARTWORK_REF default to the pinned main commits; the published pack of the variant is fetched and its checksum is pinned"
@@ -4634,10 +4634,10 @@ fi
 if [ "$r17e" -eq 0 ] &&
 	grep -q 'git clone --quiet --no-checkout https://github.com/wtfbsd/installer-template.git ' "$lv/e17.log" &&
 	grep -q 'checkout --quiet 907e707a606edc2023d437fc41c46a674f8143f5$' "$lv/e17.log" &&
-	grep -q 'artwork  the published pack https://github.com/wtfbsd/artwork-template/releases/download/pack-ce8e9714a2b4/examplebsd-ce8e9714a2b4-default.tar.xz (sha256 cf0b37d9a793f8f16cc78f2a82122fac28087253cc27cac384357fd6a6d85ce7), variant default, version 2026.11$' "$lv/e17.log"; then
-	ok "(LV17) the six keys left empty keep the template's pins and defaults (the pinned installer from the public repository, pack ce8e971 default with its pinned sum, version 2026.11)"
+	grep -q 'artwork  the published pack https://github.com/wtfbsd/artwork-template/releases/download/pack-2e86db4e6df8/examplebsd-2e86db4e6df8-default.tar.xz (sha256 efba8dc2b825a7daf367ac2c2c11ff685bb1329555483b360722e2d34529209b), variant default, version 2026.11$' "$lv/e17.log"; then
+	ok "(LV17) the six keys left empty keep the template's pins and defaults (the pinned installer from the public repository, pack 2e86db4 default with its pinned sum, version 2026.11)"
 else
-	no "(LV17) the six keys left empty keep the template's pins and defaults (the pinned installer from the public repository, pack ce8e971 default with its pinned sum, version 2026.11) (rc=$r17e)"
+	no "(LV17) the six keys left empty keep the template's pins and defaults (the pinned installer from the public repository, pack 2e86db4 default with its pinned sum, version 2026.11) (rc=$r17e)"
 	grep -n 'installer\|artwork\|clone\|checkout\|product.conf' "$lv/e17.log" | head -8 | sed 's/^/      | /'
 fi
 { cat "$fixture"; printf '%s\n' "ARTWORK_SHA256=$lv17s"; } > "$lv/sum17.conf"
@@ -4669,10 +4669,10 @@ FAKE_DOWNLOAD=$pd ARTWORK_PACKS_SHA256="$lv/pinned.sha256" REAL_PATH_PREFIX="$lv
 	REAL_NO_PACK=1 REAL_PROFILE=desktop realbuild "$work/lv14f" -u ciuser -P "$work/pass.hash"; r8=$realrc
 FAKE_DOWNLOAD=$pd REAL_PATH_PREFIX="$lv/fetchbin" ARTWORK_PACKS_SHA256="$repo/tools/artwork-packs.sha256" \
 	REAL_NO_PACK=1 REAL_PROFILE=desktop realbuild "$work/lv14g" -u ciuser -P "$work/pass.hash"; r9=$realrc
-if [ "$r8" -eq 0 ] && grep -q '^CMD fetch -q -o .*examplebsd-ce8e9714a2b4-default.tar.xz https://github.com/wtfbsd/artwork-template/releases/download/pack-ce8e9714a2b4/' "$work/lv14f/stub.log" &&
+if [ "$r8" -eq 0 ] && grep -q '^CMD fetch -q -o .*examplebsd-2e86db4e6df8-default.tar.xz https://github.com/wtfbsd/artwork-template/releases/download/pack-2e86db4e6df8/' "$work/lv14f/stub.log" &&
 	[ -s "$work/lv14f/out/desktop/root/usr/local/share/examplebsd/identity" ] &&
 	[ "$r9" -ne 0 ] && grep -q 'does not match the checksum pinned in' "$work/lv14g/build.log" &&
-	[ ! -d "$work/lv14g/out/artwork-pack/examplebsd-ce8e9714a2b4-default" ]; then
+	[ ! -d "$work/lv14g/out/artwork-pack/examplebsd-2e86db4e6df8-default" ]; then
 	ok "(LV14) the downloaded pack is used when it matches the pinned checksum and refused before unpacking when it does not"
 else
 	no "(LV14) the downloaded pack is used when it matches the pinned checksum and refused before unpacking when it does not ($r8/$r9)"
@@ -4685,7 +4685,7 @@ else
 	no "(LV14) an ARTWORK_REF without a pinned pack checksum is refused"
 fi
 ARTWORK_PACKS_SHA256="$repo/tools/artwork-packs.sha256" sh "$build" -n -c "$fixture" -p desktop --no-user -o "$lv/a6" > "$lv/a6.log" 2>&1
-if [ $? -ne 0 ] && grep -q 'examplebsd-ce8e9714a2b4-default.tar.xz is not the one pinned in' "$lv/a6.log"; then
+if [ $? -ne 0 ] && grep -q 'examplebsd-2e86db4e6df8-default.tar.xz is not the one pinned in' "$lv/a6.log"; then
 	ok "(LV14) a local pack named like a pinned one but with other content is refused"
 else
 	no "(LV14) a local pack named like a pinned one but with other content is refused"

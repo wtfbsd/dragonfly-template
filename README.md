@@ -368,7 +368,7 @@ Things a forker should expect from the stock installer:
 
 The desktop takes its look from the artwork template, pinned like the
 installer: `ARTWORK_REF` (product.conf; default the merged main of
-artwork-template, `ce8e9714...`) and `ARTWORK_VARIANT` (`default`,
+artwork-template, `2e86db4e...`) and `ARTWORK_VARIANT` (`default`,
 `cyberpunk`, ...). The build uses the **pre-rendered pack** of that commit
 and variant (`scripts/pack.sh` of the template), so the build host renders
 nothing and needs only ImageMagick to stamp the identity line:
@@ -416,7 +416,8 @@ into the release root:
   media and installed system; its `Exec=` line is written by the build to
   name that helper), which puts the wallpaper on every display output that
   has none yet. The pack's panel file defines one panel along the top, in
-  the format read by xfce4-panel. A spot
+  the format read by xfce4-panel, spanning the full width, with a digital
+  clock. A spot
   marked supported that this template has no way to install, or whose file
   is not in the pack, stops the build.
 - The DragonFly loader has no image splash (its ASCII art is compiled in):
