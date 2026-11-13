@@ -658,7 +658,7 @@ ARTWORK_PACKS_SHA256=${ARTWORK_PACKS_SHA256:-$ROOT/tools/artwork-packs.sha256}
 ARTURL=''
 ARTPIN=''
 # the pinned default: main of artwork-template (the merged release)
-ARTWORK_REF_DEFAULT=ce8e9714a2b47e3f17ff36ea647dbcc02f4399ac
+ARTWORK_REF_DEFAULT=2e86db4e6df87d4d5affdab620c3f8ccbb88e4a7
 ARTWORK_REF=${_env_artwork_ref:-${ARTWORK_REF:-$ARTWORK_REF_DEFAULT}}
 ARTWORK_VARIANT=${ARTWORK_VARIANT:-default}
 # ARTWORK_SHA256 (optional): the sha256 of the pack, for a product's own
